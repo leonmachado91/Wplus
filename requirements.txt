@@ -1,0 +1,45 @@
+# ── Core ────────────────────────────────────────────────────────────────────
+PyQt6>=6.6
+pydantic>=2.5
+python-dotenv>=1.0
+
+# ── Servers ──────────────────────────────────────────────────────────────────
+websockets>=12.0
+fastapi>=0.109
+uvicorn[standard]>=0.27
+
+# ── Audio capture ─────────────────────────────────────────────────────────────
+sounddevice>=0.4.6
+# PyAudioWPatch is required for WASAPI loopback (Windows system audio capture)
+# Install separately: pip install PyAudioWPatch
+numpy>=1.26
+soundfile>=0.12
+scipy>=1.13
+
+# ── VAD ──────────────────────────────────────────────────────────────────────
+# torch is loaded via requirements below; silero-vad fetched via torch.hub at runtime
+torch>=2.1
+torchaudio>=2.1
+
+# ── Transcription ─────────────────────────────────────────────────────────────
+groq>=0.4
+
+# ── File Watcher (Mode 1) ────────────────────────────────────────────────────
+watchdog>=4.0
+pydub>=0.25
+# ffmpeg binary required by pydub — bundled via imageio-ffmpeg:
+imageio-ffmpeg>=0.4.9
+
+# ── Keyboard injection (Mode 3) ───────────────────────────────────────────────
+pynput>=1.7
+
+# ── Diarization (optional — auto-installed on first use) ─────────────────────
+# pyannote.audio 3.3.2+ fixes: numpy 2.0 compat, torchaudio 2.8+, `token` param
+# Uncomment to pre-install:
+# pyannote.audio>=3.3.2
+#
+# SETUP REQUIRED before first use:
+#   1. Accept model terms at https://huggingface.co/pyannote/speaker-diarization-3.1
+#   2. Accept model terms at https://huggingface.co/pyannote/segmentation-3.0
+#   3. Create a READ token at https://huggingface.co/settings/tokens
+#   4. Add HUGGINGFACE_TOKEN=hf_... to your .env file

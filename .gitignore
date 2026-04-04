@@ -1,0 +1,40 @@
+# Virtual environments
+venv/
+env/
+.env
+.venv/
+env.bak/
+venv.bak/
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local application settings
+settings.json
+settings.json.bak
+output/
+live_output/
+
+# Logs
+*.log
+
+# PyAudio fallback / other builds
+build/
+dist/
+*.egg-info/
+
+# IDEs
+.vscode/
+.idea/
+*.swp
+.agent/
