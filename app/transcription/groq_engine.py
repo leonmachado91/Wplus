@@ -7,6 +7,7 @@ import io
 import logging
 import time
 import threading
+from collections import deque
 from typing import TYPE_CHECKING, Callable, Optional
 
 from groq import AsyncGroq, RateLimitError, APIStatusError
@@ -74,8 +75,8 @@ class TranscriptionEngine:
         self._ready = threading.Event()
         self._client: Optional[AsyncGroq] = None
 
-        # Rolling context: texto do último segmento válido (P1/P3)
-        self._last_segment_text: str = ""
+        # Rolling context: textos recentes para filtro de eco e prompt dinâmico
+        self._recent_texts: deque[str] = deque(maxlen=10)
         self._last_segment_lock = threading.Lock()
 
     def reset_context(self) -> None:
@@ -85,7 +86,7 @@ class TranscriptionEngine:
         para evitar que o contexto da sessão anterior influencie a nova.
         """
         with self._last_segment_lock:
-            self._last_segment_text = ""
+            self._recent_texts.clear()
         logger.debug("Transcription context reset para nova sessão")
 
     # ── lifecycle ────────────────────────────────────────────────────────
@@ -179,8 +180,11 @@ class TranscriptionEngine:
         # Rolling context: combina o prompt estático com o contexto dinâmico do último segmento.
         # O Whisper usa apenas os últimos ~224 tokens do prompt — truncamos para ≈1200 chars (~220 tok)
         # para garantir que a parte mais recente da conversa sempre caiba.
+        
+        use_rolling = self._settings.get("api", "use_rolling_context")
+
         with self._last_segment_lock:
-            last_text = self._last_segment_text
+            last_text = " ".join(self._recent_texts) if use_rolling else ""
 
         if last_text:
             dynamic_prompt = f"{base_prompt} {last_text}".strip() if base_prompt else last_text
@@ -214,14 +218,13 @@ class TranscriptionEngine:
 
                 segment = self._response_to_segment(response, meta)
                 if segment:
-                    # Atualiza o contexto dinâmico APENAS se o segmento tem conteúdo suficiente.
-                    # Chunks muito curtos (interjeições, ruídos) não devem contaminar o contexto
-                    # porque erros de transcrição nesses chunks criam feedback loops.
+                    # Atualiza o contexto dinâmico APENAS se o segmento tem conteúdo suficiente
+                    # E confiança > 0.40 para evitar realimentar alucinações de ruído (Congelamento de Contexto).
                     segment_words = len(segment.text.split())
-                    if segment_words >= 5:
+                    conf = segment.confidence if segment.confidence is not None else 1.0
+                    if segment_words >= 5 and conf >= 0.40:
                         with self._last_segment_lock:
-                            combined = (self._last_segment_text + " " + segment.text).strip()
-                            self._last_segment_text = combined[-600:] if len(combined) > 600 else combined
+                            self._recent_texts.append(segment.text.strip())
 
                     if self._buffer is not None:
                         self._buffer.add_segment(segment)
@@ -261,15 +264,18 @@ class TranscriptionEngine:
                 else:
                     return
 
-    def _is_hallucination(self, text: str, prev_text: str, confidence: float = 0.0) -> bool:
-        """Detecta alucinações comuns do Whisper incluindo similaridade fuzzy.
+    def _is_hallucination(self, text: str, recent_texts: list[str], confidence: float = 0.0) -> bool:
+        """Detecta alucinações comuns do Whisper incluindo similaridade fuzzy na janela de histórico.
 
         As listas de frases são lidas das settings em tempo de execução,
         permitindo que o usuário as configure pela UI sem reiniciar o app.
         """
         from difflib import SequenceMatcher
+        import re
 
-        text_lower = text.lower().strip()
+        # Strip agressivo para ignorar pontuação ruidosa (ex: "[e aí]", "...e aí")
+        raw_text_lower = text.lower().strip()
+        stripped_lower = re.sub(r'[^\w\s]', '', raw_text_lower).strip()
 
         # Lê as listas das settings (configuráveis pela UI)
         filters = self._settings.get("filters")
@@ -278,31 +284,35 @@ class TranscriptionEngine:
 
         # 1. Prefixos: filtra quando a frase INICIA o texto
         for phrase in prefixes:
-            if text_lower == phrase or text_lower.startswith(phrase + " "):
+            if raw_text_lower == phrase or raw_text_lower.startswith(phrase + " "):
                 return True
 
-        # 2. Exact-match: só filtra quando é o texto COMPLETO do segmento
-        # Ex: "e aí" sozinho = ruído; "e aí, você viu?" = fala real
-        if text_lower in exact_set:
+        # 2. Exact-match: usa versão sanitizada (stripped) para não ser enganado por pontuação
+        if stripped_lower in exact_set:
             return True
 
-        # 3. Repetição exata do segmento anterior
-        if prev_text and text_lower == prev_text.strip().lower():
-            return True
-
-        # 4. P3: Similaridade fuzzy com o segmento anterior (> 85%)
-        if prev_text and len(text_lower) > 10 and len(prev_text) > 10:
-            ratio = SequenceMatcher(None, text_lower, prev_text.lower().strip()).ratio()
-            if ratio > 0.85:
-                logger.debug("Similaridade %.0f%% com segmento anterior — descartado", ratio * 100)
-                return True
+        # 3. Repetição e fuzzy match contra a janela de histórico
+        if recent_texts and len(raw_text_lower) > 6:
+            for prev_text in reversed(recent_texts):
+                prev_lower = prev_text.lower().strip()
+                
+                # Check repetição exata
+                if raw_text_lower == prev_lower:
+                    return True
+                
+                # Fuzzy match se ambos forem longos
+                if len(raw_text_lower) > 10 and len(prev_lower) > 10:
+                    ratio = SequenceMatcher(None, raw_text_lower, prev_lower).ratio()
+                    if ratio > 0.85:
+                        logger.debug("Similaridade %.0f%% com segmento no histórico — descartado", ratio * 100)
+                        return True
 
         # 5. Texto muito curto (< 3 chars)
-        if len(text_lower.replace(" ", "")) < 3:
+        if len(raw_text_lower.replace(" ", "")) < 3:
             return True
 
         # 6. Palavra repetida 4+ vezes na mesma frase
-        words = text_lower.split()
+        words = raw_text_lower.split()
         if len(words) >= 4:
             for word in set(words):
                 if words.count(word) >= 4 and len(word) > 2:
@@ -318,11 +328,14 @@ class TranscriptionEngine:
             return None
 
         # Filtra alucinações antes de prosseguir (antes de calcular confidence)
-        with self._last_segment_lock:
-            prev = self._last_segment_text
-        if self._is_hallucination(text, prev):
-            logger.warning("Alucinação detectada e descartada: %r", text[:100])
-            return None
+        use_filters = self._settings.get("filters", "enabled")
+        
+        if use_filters:
+            with self._last_segment_lock:
+                recent_texts = list(self._recent_texts)
+            if self._is_hallucination(text, recent_texts):
+                logger.warning("Alucinação detectada e descartada: %r", text[:100])
+                return None
 
         session_offset = meta.get("start_time", 0.0)
         chunk_was_forced = meta.get("chunk_was_forced", False)

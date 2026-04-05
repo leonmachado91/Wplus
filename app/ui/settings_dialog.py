@@ -199,6 +199,15 @@ class SettingsDialog(QDialog):
         self._ui_elements["api"]["groq_prompt"] = prompt_input
         layout.addRow("Prompt de Contexto:", prompt_input)
 
+        rolling_cb = QCheckBox("Habilitar Rolling Context")
+        rolling_cb.setToolTip(
+            "Se ativado, o aplicativo enviará partes da transcrição recente \n"
+            "junto com o prompt para ajudar o modelo a manter o contexto da conversa.\n"
+            "Desative se quiser que cada trecho de áudio seja transcrito do zero absoluto."
+        )
+        self._ui_elements["api"]["use_rolling_context"] = rolling_cb
+        layout.addRow("Contexto de Histórico:", rolling_cb)
+
         temp_spin = QDoubleSpinBox()
         temp_spin.setRange(0.0, 2.0)
         temp_spin.setSingleStep(0.1)
@@ -489,6 +498,14 @@ class SettingsDialog(QDialog):
         )
         intro.setWordWrap(True)
         layout.addWidget(intro)
+
+        enabled_cb = QCheckBox("Habilitar Filtros de Alucinação")
+        enabled_cb.setToolTip(
+            "Se desativado, o aplicativo irá transcrever absolutamente tudo, "
+            "incluindo os ruídos repetitivos (ex: 'thanks for watching')."
+        )
+        self._ui_elements["filters"]["enabled"] = enabled_cb
+        layout.addWidget(enabled_cb)
 
         layout.addWidget(QLabel("<b>Filtro por Prefixo</b> — descarta quando o texto <i>começa</i> com a frase:"))
         self._filter_prefixes_edit = QPlainTextEdit()

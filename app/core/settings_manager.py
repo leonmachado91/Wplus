@@ -21,6 +21,7 @@ class ApiSettings(BaseModel):
     groq_model: str = "whisper-large-v3-turbo"
     groq_language: Optional[str] = None
     groq_prompt: str = ""
+    use_rolling_context: bool = True
     groq_temperature: float = 0
     confidence_threshold: float = 0.0
     huggingface_token: str = ""
@@ -95,6 +96,8 @@ class UISettings(BaseModel):
 
 class FiltersSettings(BaseModel):
     """Listas de frases que o filtro de alucinações usa para descartar segmentos."""
+
+    enabled: bool = True
 
     # Filtradas quando INICIAM o texto (prefixo)
     hallucination_prefixes: list[str] = Field(default_factory=lambda: [
