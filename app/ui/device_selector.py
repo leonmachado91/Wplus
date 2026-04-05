@@ -32,7 +32,7 @@ class DeviceSelector(QWidget):
 
         self._refresh_btn = QPushButton("↺")
         self._refresh_btn.setFixedSize(28, 28)
-        self._refresh_btn.setToolTip("Refresh device list")
+        self._refresh_btn.setToolTip("Atualizar lista de dispositivos")
         self._refresh_btn.clicked.connect(self.refresh)
         layout.addWidget(self._refresh_btn)
 
@@ -55,7 +55,7 @@ class DeviceSelector(QWidget):
 
         self._combo.blockSignals(True)
         self._combo.clear()
-        self._combo.addItem("System Default", None)
+        self._combo.addItem("Padrão do Sistema", None)
         for d in self._devices:
             label = d.name
             if d.is_loopback:

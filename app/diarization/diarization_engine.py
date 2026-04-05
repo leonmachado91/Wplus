@@ -1,6 +1,6 @@
 """Diarization engine — per-chunk speaker verification via pyannote embeddings.
 
-WHY THIS APPROACH (v3 — final):
+WHY THIS APPROACH (v4 — sub-chunk):
     The pipeline (speaker-diarization-3.1) uses AHC clustering internally and
     needs to see multiple speakers at the same time in the same audio file.
     When you feed it a single short VAD chunk (1 person talking), it returns
@@ -12,18 +12,21 @@ WHY THIS APPROACH (v3 — final):
 
     This is Speaker Verification, not Speaker Diarization.
 
-    Approach:
+    Approach (v4 — sliding window for rapid turn-taking):
     1. Load the pipeline just to access its internal embedding model
        (wespeaker-voxceleb-resnet34 — no extra download needed)
-    2. For each chunk, run Inference(embedding_model, window="whole")
-       → returns a (1, D) embedding vector — the voice fingerprint
-    3. Compare against known speaker embeddings via cosine similarity
-    4. If similarity >= threshold → same speaker → reuse global ID
-    5. If below threshold → new speaker → assign next global ID
-    6. As session grows, update running average of each speaker's embedding
+    2. For LONG chunks (>= 2 × WINDOW_DURATION_S), split into overlapping
+       sub-windows of WINDOW_DURATION_S, stepping STEP_S each time.
+       For SHORT chunks, fall back to a single whole-chunk embedding (v3 behaviour).
+    3. For each sub-window, run Inference and match against known speakers.
+    4. Merge adjacent windows that share the same speaker.
+    5. Emit the merged list: [{start, end, speaker}, …] — 1 item when only
+       one speaker speaks, N items when speakers alternate.
+    6. ModeController then crosses these time ranges with Groq word timestamps
+       to reconstruct per-speaker text spans.
 
-    This runs fast (~50-150ms per chunk on CPU), works on any chunk length,
-    and correctly tracks speakers across the entire session.
+    Sliding window cost: ~9 × inference per 5-s chunk instead of 1 ×.
+    GPU mode handles this comfortably (~50-150 ms per inference).
 """
 
 from __future__ import annotations
@@ -50,6 +53,11 @@ _SIM_THRESHOLD = 0.65
 
 # Timeout for a single embedding inference call.
 _EMBED_TIMEOUT_S = 15
+
+# Sliding window parameters for sub-chunk speaker detection.
+# Chunks shorter than 2 × _WINDOW_S fall back to whole-chunk behaviour.
+_WINDOW_S: float = 1.0    # duration of each sub-window in seconds
+_STEP_S: float = 0.5      # advance between windows (50 % overlap)
 
 
 class DiarizationEngine:
@@ -170,7 +178,15 @@ class DiarizationEngine:
     # ── main processing ───────────────────────────────────────────────────
 
     def _process_chunk(self, wav_bytes: bytes, chunk_meta: dict, segment_id: str) -> None:
-        """Extract embedding for chunk, match to known speaker, emit result."""
+        """Extract embeddings for chunk (sliding window) and emit speaker annotations.
+
+        For chunks >= 2 × _WINDOW_S: split into overlapping sub-windows, extract
+        one embedding per window, merge adjacent windows with the same speaker,
+        then emit a list of {start, end, speaker} dicts.
+
+        For short chunks: fall back to a single whole-chunk embedding (v3 behaviour)
+        to avoid wasting GPU cycles on utterances that are clearly one person.
+        """
         try:
             import torch
             import soundfile as sf
@@ -187,38 +203,101 @@ class DiarizationEngine:
                 logger.debug("Chunk %s too short (%.2fs) — skipping", segment_id, duration_s)
                 return
 
-            waveform = torch.from_numpy(audio_np).unsqueeze(0)  # (1, T)
-            if self._use_gpu and torch.cuda.is_available():
-                waveform = waveform.cuda()
+            session_start = chunk_meta.get("start_time", 0.0)
+            session_end = chunk_meta.get("end_time", session_start + duration_s)
 
-            # Extract voice fingerprint
+            use_gpu = self._use_gpu and torch.cuda.is_available()
             t0 = time.monotonic()
-            embedding = self._extract_embedding(waveform, sr)
+
+            # ── Decide strategy ──────────────────────────────────────────
+            if duration_s >= 2.0 * _WINDOW_S:
+                annotations = self._sliding_window(
+                    audio_np, sr, session_start, use_gpu
+                )
+            else:
+                # Short chunk fallback — whole-chunk embedding (v3 behaviour)
+                waveform = torch.from_numpy(audio_np).unsqueeze(0)
+                if use_gpu:
+                    waveform = waveform.cuda()
+                embedding = self._extract_embedding(waveform, sr)
+                if embedding is None:
+                    logger.warning("Could not extract embedding for %s", segment_id)
+                    return
+                speaker_id = self._match_or_register(embedding)
+                annotations = [{"speaker": speaker_id, "start": session_start, "end": session_end}]
+
             elapsed = time.monotonic() - t0
-
-            if embedding is None:
-                logger.warning("Could not extract embedding for %s", segment_id)
-                return
-
-            # Match against known speakers or register new one
-            speaker_id = self._match_or_register(embedding)
-
+            n_spans = len(annotations)
             logger.info(
-                "Speaker identified: %s → %s (%.2fs, %.2fs audio)",
-                segment_id, speaker_id, elapsed, duration_s,
+                "Diarization: %s → %d span(s) in %.2fs (%.2fs audio)",
+                segment_id, n_spans, elapsed, duration_s,
             )
+            if n_spans > 1:
+                for a in annotations:
+                    logger.debug("  span %.2f–%.2f → %s", a["start"], a["end"], a["speaker"])
 
-            start_time = chunk_meta.get("start_time", 0.0)
-            end_time = chunk_meta.get("end_time", start_time + duration_s)
-
-            self._on_result(segment_id, [{
-                "speaker": speaker_id,
-                "start": start_time,
-                "end": end_time,
-            }])
+            self._on_result(segment_id, annotations)
 
         except Exception as e:
             logger.error("Error processing chunk %s: %s", segment_id, e, exc_info=True)
+
+    def _sliding_window(
+        self,
+        audio_np: "np.ndarray",
+        sr: int,
+        session_offset: float,
+        use_gpu: bool,
+    ) -> list[dict]:
+        """Run embedding inference over overlapping sub-windows and return merged annotations."""
+        import torch
+
+        window_samples = int(_WINDOW_S * sr)
+        step_samples = int(_STEP_S * sr)
+        total_samples = len(audio_np)
+
+        raw_annotations: list[dict] = []
+        pos = 0
+        while pos < total_samples:
+            end_pos = min(pos + window_samples, total_samples)
+            window_np = audio_np[pos:end_pos]
+
+            # Skip sub-windows that are too short to produce a reliable embedding
+            win_dur = len(window_np) / sr
+            if win_dur < 0.3:
+                pos += step_samples
+                continue
+
+            waveform = torch.from_numpy(window_np).unsqueeze(0)
+            if use_gpu:
+                waveform = waveform.cuda()
+
+            embedding = self._extract_embedding(waveform, sr)
+            if embedding is not None:
+                speaker_id = self._match_or_register(embedding)
+                t_start = session_offset + pos / sr
+                t_end = session_offset + end_pos / sr
+                raw_annotations.append({"speaker": speaker_id, "start": t_start, "end": t_end})
+
+            pos += step_samples
+
+        return self._merge_annotations(raw_annotations)
+
+    @staticmethod
+    def _merge_annotations(anns: list[dict]) -> list[dict]:
+        """Collapse adjacent windows that share the same speaker into a single span.
+
+        This reduces noise from window border effects where the same speaker
+        gets split across two consecutive windows.
+        """
+        if not anns:
+            return anns
+        merged = [anns[0].copy()]
+        for a in anns[1:]:
+            if a["speaker"] == merged[-1]["speaker"]:
+                merged[-1]["end"] = a["end"]  # extend current span
+            else:
+                merged.append(a.copy())
+        return merged
 
     def _extract_embedding(self, waveform, sample_rate: int) -> Optional[np.ndarray]:
         """Run embedding inference with timeout. Returns unit-norm numpy vector."""

@@ -78,21 +78,21 @@ class LivePanel(QWidget):
         source_row = QHBoxLayout()
         source_row.setSpacing(12)
 
-        source_label = QLabel("Source:")
+        source_label = QLabel("Fonte:")
         source_label.setObjectName("labelMuted")
         source_row.addWidget(source_label)
 
-        self._radio_mic = QRadioButton("Mic")
+        self._radio_mic = QRadioButton("Microfone")
         self._radio_mic.setChecked(True)
         self._radio_mic.toggled.connect(self._on_source_changed)
         source_row.addWidget(self._radio_mic)
 
-        self._radio_loopback = QRadioButton("System Audio")
+        self._radio_loopback = QRadioButton("Áudio do Sistema")
         source_row.addWidget(self._radio_loopback)
 
         source_row.addSpacing(20)
 
-        device_label = QLabel("Device:")
+        device_label = QLabel("Dispositivo:")
         device_label.setObjectName("labelMuted")
         source_row.addWidget(device_label)
 
@@ -105,42 +105,42 @@ class LivePanel(QWidget):
         btn_row = QHBoxLayout()
         btn_row.setSpacing(8)
 
-        self._btn_record = QPushButton("● REC")
+        self._btn_record = QPushButton("⏺  Gravar")
         self._btn_record.setObjectName("btnRecord")
         self._btn_record.setCheckable(True)
-        self._btn_record.setMinimumWidth(80)
+        self._btn_record.setMinimumWidth(90)
         self._btn_record.clicked.connect(self._on_record_clicked)
         btn_row.addWidget(self._btn_record)
 
-        self._btn_stop = QPushButton("■ Stop")
+        self._btn_stop = QPushButton("⏹  Parar")
         self._btn_stop.setObjectName("btnStop")
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._on_stop_clicked)
         btn_row.addWidget(self._btn_stop)
 
-        self._btn_export = QPushButton("💾 Export")
+        self._btn_export = QPushButton("↓  Exportar")
         self._btn_export.setObjectName("btnExport")
         self._btn_export.clicked.connect(self._on_export_clicked)
         btn_row.addWidget(self._btn_export)
 
-        self._btn_clear = QPushButton("🗑 Clear")
+        self._btn_clear = QPushButton("×  Limpar")
         self._btn_clear.setObjectName("btnClear")
         self._btn_clear.clicked.connect(self._on_clear_clicked)
         btn_row.addWidget(self._btn_clear)
 
         btn_row.addStretch()
 
-        # auto-save
-        self._chk_autosave = QCheckBox("Auto-save:")
+        # salvamento automático
+        self._chk_autosave = QCheckBox("Salvar automaticamente:")
         self._chk_autosave.toggled.connect(self._on_autosave_toggled)
         btn_row.addWidget(self._chk_autosave)
 
         self._txt_autosave_path = QLineEdit()
-        self._txt_autosave_path.setPlaceholderText("output folder...")
+        self._txt_autosave_path.setPlaceholderText("pasta de saída...")
         self._txt_autosave_path.setMinimumWidth(160)
         btn_row.addWidget(self._txt_autosave_path)
 
-        self._btn_browse = QPushButton("Browse")
+        self._btn_browse = QPushButton("Procurar")
         self._btn_browse.clicked.connect(self._on_browse_clicked)
         btn_row.addWidget(self._btn_browse)
 
@@ -155,7 +155,7 @@ class LivePanel(QWidget):
         status_row = QHBoxLayout()
         status_row.setSpacing(16)
 
-        audio_label = QLabel("Audio:")
+        audio_label = QLabel("Áudio:")
         audio_label.setObjectName("labelMuted")
         status_row.addWidget(audio_label)
 
@@ -229,13 +229,13 @@ class LivePanel(QWidget):
             self._device_selector.setEnabled(False)
             self._rms_timer.start(50)  # 20fps RMS polling
 
-            self._status_label.setText("Recording...")
+            self._status_label.setText("Gravando...")
             self._status_label.setStyleSheet("color: #fb4934; font-weight: bold;")
             logger.info("Recording started (mode=%s, device=%s)", mode, device_index)
 
         except Exception as e:
             logger.exception("Failed to start recording")
-            self._status_label.setText(f"Error: {e}")
+            self._status_label.setText(f"Erro: {e}")
             self._status_label.setStyleSheet("color: #fb4934;")
             self._cleanup_pipeline()
 
@@ -243,7 +243,7 @@ class LivePanel(QWidget):
         if not self._is_recording:
             return
 
-        self._status_label.setText("Stopping...")
+        self._status_label.setText("Parando...")
         self._status_label.setStyleSheet("color: #fabd2f;")
         self._btn_stop.setEnabled(False)
 
@@ -265,7 +265,7 @@ class LivePanel(QWidget):
 
         self._rms_timer.stop()
         self._rms_bar.setValue(0)
-        self._vad_label.setText("VAD: —")
+        self._vad_label.setText("VAD: —")  # reset
 
         self._is_recording = False
         self._btn_record.setChecked(False)
@@ -277,7 +277,7 @@ class LivePanel(QWidget):
 
         count = info.get("segment_count", 0)
         dur = info.get("duration_s", 0.0)
-        self._status_label.setText(f"Stopped — {count} segments, {dur:.1f}s")
+        self._status_label.setText(f"Concluído — {count} segmentos, {dur:.1f}s")
         self._status_label.setStyleSheet("color: #b8bb26;")
         logger.info("Recording stopped: %d segments, %.1fs", count, dur)
 
@@ -313,10 +313,10 @@ class LivePanel(QWidget):
     @pyqtSlot(bool)
     def _on_vad_state_changed(self, is_speech: bool) -> None:
         if is_speech:
-            self._vad_label.setText("VAD: SPEECH")
+            self._vad_label.setText("VAD: FALA")
             self._vad_label.setStyleSheet("color: #b8bb26; font-weight: bold;")
         else:
-            self._vad_label.setText("VAD: silence")
+            self._vad_label.setText("VAD: silêncio")
             self._vad_label.setStyleSheet("color: #a89984;")
 
     # ── diarization status (cross-thread safe) ───────────────────────────
@@ -381,9 +381,9 @@ class LivePanel(QWidget):
     def _on_export_clicked(self) -> None:
         path, _ = QFileDialog.getSaveFileName(
             self,
-            "Export Transcription",
+            "Exportar Transcrição",
             "",
-            "Markdown (*.md);;Text (*.txt);;All Files (*)",
+            "Markdown (*.md);;Texto (*.txt);;Todos os arquivos (*)",
         )
         if not path:
             return
@@ -391,13 +391,13 @@ class LivePanel(QWidget):
             self._buffer.export_text(path)
         else:
             self._buffer.export_markdown(path)
-        self._status_label.setText(f"Exported to {Path(path).name}")
+        self._status_label.setText(f"Exportado: {Path(path).name}")
         self._status_label.setStyleSheet("color: #b8bb26;")
 
     def _on_clear_clicked(self) -> None:
         self._buffer.clear()
         self._transcript.clear_transcript()
-        self._status_label.setText("Cleared")
+        self._status_label.setText("Limpo")
         self._status_label.setStyleSheet("color: #a89984;")
 
     def _on_autosave_toggled(self, checked: bool) -> None:
@@ -405,6 +405,6 @@ class LivePanel(QWidget):
         self._btn_browse.setEnabled(checked)
 
     def _on_browse_clicked(self) -> None:
-        folder = QFileDialog.getExistingDirectory(self, "Select Auto-save Folder")
+        folder = QFileDialog.getExistingDirectory(self, "Selecionar Pasta de Salvamento")
         if folder:
             self._txt_autosave_path.setText(folder)

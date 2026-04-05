@@ -22,6 +22,7 @@ class ApiSettings(BaseModel):
     groq_language: Optional[str] = None
     groq_prompt: str = ""
     groq_temperature: float = 0
+    confidence_threshold: float = 0.0
     huggingface_token: str = ""
 
 
@@ -92,6 +93,40 @@ class UISettings(BaseModel):
     minimize_to_tray: bool = True
 
 
+class FiltersSettings(BaseModel):
+    """Listas de frases que o filtro de alucinações usa para descartar segmentos."""
+
+    # Filtradas quando INICIAM o texto (prefixo)
+    hallucination_prefixes: list[str] = Field(default_factory=lambda: [
+        "thanks for watching",
+        "thank you for watching",
+        "please subscribe",
+        "subtitles by",
+        "transcribed by",
+        "www.",
+        "[music]",
+        "[applause]",
+        "legendas:",
+        "legenda:",
+    ])
+
+    # Filtradas apenas quando são o texto COMPLETO do segmento
+    hallucination_exact: list[str] = Field(default_factory=lambda: [
+        "you",
+        "e aí",
+        "e aí.",
+        "e aí...",
+        "e aí,",
+        "aí",
+        "né",
+        "né.",
+        "bom",
+        "bom.",
+        "então",
+        "lá",
+    ])
+
+
 class AppSettings(BaseModel):
     api: ApiSettings = Field(default_factory=ApiSettings)
     audio: AudioSettings = Field(default_factory=AudioSettings)
@@ -102,6 +137,7 @@ class AppSettings(BaseModel):
     mode2: Mode2Settings = Field(default_factory=Mode2Settings)
     mode3: Mode3Settings = Field(default_factory=Mode3Settings)
     ui: UISettings = Field(default_factory=UISettings)
+    filters: FiltersSettings = Field(default_factory=FiltersSettings)
 
 
 # ── Settings Manager ────────────────────────────────────────────────────────

@@ -73,18 +73,18 @@ class TranscriptBuffer:
                 segment.speaker = self._pending_speakers.pop(segment.id)
                 logger.info("Applied pending speaker %s to segment %s", segment.speaker, segment.id)
             self._segments.append(segment)
-            
+
         event = "segment_partial" if segment.is_partial else "segment_final"
         self._notify(event, {
             "session_id": self.session_id,
             "segment": segment.to_dict(),
         })
-        # auto-save append
+        # auto-save append — writes all lines for the segment (1 or N for sub_segments)
         if self._auto_save_path:
             try:
-                line = self._segment_to_md_line(segment)
+                lines = self._segment_to_lines(segment)
                 with open(self._auto_save_path, "a", encoding="utf-8") as f:
-                    f.write(line + "\n")
+                    f.write("\n".join(lines) + "\n")
             except Exception:
                 logger.exception("Auto-save failed")
 
@@ -98,11 +98,20 @@ class TranscriptBuffer:
                 return None
             for k, v in updates.items():
                 setattr(seg, k, v)
-                
+
         self._notify("segment_updated", {
             "session_id": self.session_id,
             "segment": seg.to_dict(),
         })
+
+        # Auto-save: rewrite file when diarization updates arrive so the saved
+        # file reflects the final speaker labels and sub_segments.
+        if self._auto_save_path and ("speaker" in updates or "sub_segments" in updates):
+            try:
+                self._auto_save_rewrite()
+            except Exception:
+                logger.exception("Auto-save rewrite failed")
+
         return seg
 
     def get_segments(self) -> list[TranscriptSegment]:
@@ -112,13 +121,9 @@ class TranscriptBuffer:
     def get_plain_text(self, show_timecodes: bool = True, show_speakers: bool = True) -> str:
         lines: list[str] = []
         for seg in self.get_segments():
-            parts: list[str] = []
-            if show_timecodes:
-                parts.append(f"[{self._fmt_time(seg.start_time)}]")
-            if show_speakers and seg.speaker:
-                parts.append(seg.speaker)
-            parts.append(seg.text)
-            lines.append("  ".join(parts))
+            lines.extend(
+                self._segment_to_lines(seg, show_timecodes=show_timecodes, show_speakers=show_speakers)
+            )
         return "\n".join(lines)
 
     def clear(self) -> None:
@@ -134,6 +139,11 @@ class TranscriptBuffer:
                 return seg
         return None
 
+    def get_segment(self, segment_id: str) -> Optional[TranscriptSegment]:
+        """Return a single segment by ID (thread-safe, read-only reference)."""
+        with self._lock:
+            return self._find(segment_id)
+
     @staticmethod
     def _fmt_time(seconds: float) -> str:
         m, s = divmod(int(seconds), 60)
@@ -141,25 +151,85 @@ class TranscriptBuffer:
         return f"{h:02d}:{m:02d}:{s:02d}"
 
     @staticmethod
-    def _segment_to_md_line(seg: TranscriptSegment) -> str:
-        m, s = divmod(int(seg.start_time), 60)
-        h, m = divmod(m, 60)
-        tc = f"[{h:02d}:{m:02d}:{s:02d}]"
-        speaker = f" **{seg.speaker}**" if seg.speaker else ""
-        return f"{tc}{speaker}  {seg.text}"
+    def _segment_to_md_line(seg: "TranscriptSegment") -> str:
+        """Legacy single-line format (used by auto-save header write)."""
+        return TranscriptBuffer._segment_to_lines(seg)[0]
+
+    @staticmethod
+    def _segment_to_lines(
+        seg: "TranscriptSegment",
+        show_timecodes: bool = True,
+        show_speakers: bool = True,
+    ) -> list[str]:
+        """Convert a segment to one or more markdown lines.
+
+        When ``seg.sub_segments`` is populated, each speaker span becomes its
+        own line with its own timecode.  Otherwise, a single line is returned
+        (backwards-compatible with single-speaker segments).
+        """
+        def _tc(seconds: float) -> str:
+            m, s = divmod(int(seconds), 60)
+            h, m = divmod(m, 60)
+            return f"[{h:02d}:{m:02d}:{s:02d}]"
+
+        if seg.sub_segments:
+            lines = []
+            for i, span in enumerate(seg.sub_segments):
+                parts: list[str] = []
+                if show_timecodes:
+                    # First span gets the chunk's start time; others get span start
+                    t = seg.start_time if i == 0 else span.start
+                    parts.append(_tc(t))
+                if show_speakers and span.speaker:
+                    parts.append(f"**{span.speaker}**")
+                parts.append(span.text)
+                lines.append("  ".join(parts))
+            return lines
+
+        # Single-speaker fallback
+        parts = []
+        if show_timecodes:
+            parts.append(_tc(seg.start_time))
+        if show_speakers and seg.speaker:
+            parts.append(f"**{seg.speaker}**")
+        parts.append(seg.text)
+        return ["  ".join(parts)]
 
     # ── file export ──────────────────────────────────────────────────────
 
     def export_markdown(self, path: str | Path) -> Path:
-        """Write all segments to a Markdown file."""
+        """Write all segments to a Markdown file, respecting sub_segments."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
         lines: list[str] = [f"# Transcription — Session {self.session_id or 'unknown'}\n"]
         for seg in self.get_segments():
-            lines.append(self._segment_to_md_line(seg))
+            lines.extend(self._segment_to_lines(seg))
         p.write_text("\n".join(lines), encoding="utf-8")
         logger.info("Exported markdown to %s", p)
         return p
+
+    def _auto_save_rewrite(self) -> None:
+        """Rewrite the auto-save file with the current in-memory state.
+
+        Called after diarization updates so the saved file always reflects
+        the final speaker labels and sub_segments, not the draft written at
+        add_segment time (before diarization arrives).
+        """
+        if not self._auto_save_path:
+            return
+        with self._lock:
+            segs = list(self._segments)
+        header = f"# Transcription — Session {self.session_id or 'unknown'}\n\n"
+        body_lines: list[str] = []
+        for seg in segs:
+            body_lines.extend(self._segment_to_lines(seg))
+        try:
+            self._auto_save_path.write_text(
+                header + "\n".join(body_lines) + "\n",
+                encoding="utf-8",
+            )
+        except Exception:
+            logger.exception("Auto-save rewrite write failed")
 
     def export_text(self, path: str | Path) -> Path:
         """Write all segments as plain text."""

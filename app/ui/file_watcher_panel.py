@@ -50,50 +50,50 @@ class FileWatcherPanel(QWidget):
         root.setSpacing(12)
 
         # ── folders group ────────────────────────────────────────────────
-        folder_group = QGroupBox("Folders")
+        folder_group = QGroupBox("Pastas")
         folder_layout = QFormLayout(folder_group)
 
-        # watch folder
+        # pasta monitorada
         watch_row = QHBoxLayout()
         self._txt_watch = QLineEdit()
-        self._txt_watch.setPlaceholderText("Select folder to watch for audio files...")
-        self._btn_browse_watch = QPushButton("Browse")
+        self._txt_watch.setPlaceholderText("Selecione a pasta a monitorar por arquivos de áudio...")
+        self._btn_browse_watch = QPushButton("Procurar")
         self._btn_browse_watch.setFixedWidth(80)
         self._btn_browse_watch.clicked.connect(lambda: self._browse("watch"))
         watch_row.addWidget(self._txt_watch)
         watch_row.addWidget(self._btn_browse_watch)
         watch_container = QWidget()
         watch_container.setLayout(watch_row)
-        folder_layout.addRow("Watch Folder:", watch_container)
+        folder_layout.addRow("Pasta Monitorada:", watch_container)
 
-        # output folder
+        # pasta de saída
         out_row = QHBoxLayout()
         self._txt_output = QLineEdit()
-        self._txt_output.setPlaceholderText("Select output folder for transcriptions...")
-        self._btn_browse_out = QPushButton("Browse")
+        self._txt_output.setPlaceholderText("Selecione a pasta de saída das transcrições...")
+        self._btn_browse_out = QPushButton("Procurar")
         self._btn_browse_out.setFixedWidth(80)
         self._btn_browse_out.clicked.connect(lambda: self._browse("output"))
         out_row.addWidget(self._txt_output)
         out_row.addWidget(self._btn_browse_out)
         out_container = QWidget()
         out_container.setLayout(out_row)
-        folder_layout.addRow("Output Folder:", out_container)
+        folder_layout.addRow("Pasta de Saída:", out_container)
 
         root.addWidget(folder_group)
 
         # ── controls ─────────────────────────────────────────────────────
         ctrl_row = QHBoxLayout()
 
-        self._btn_start = QPushButton("▶  Start Watching")
+        self._btn_start = QPushButton("▶  Iniciar Monitoramento")
         self._btn_start.setObjectName("btn_start_watcher")
         self._btn_start.clicked.connect(self._on_start)
 
-        self._btn_stop = QPushButton("■  Stop")
+        self._btn_stop = QPushButton("■  Parar")
         self._btn_stop.setObjectName("btn_stop_watcher")
         self._btn_stop.setEnabled(False)
         self._btn_stop.clicked.connect(self._on_stop)
 
-        self._status_label = QLabel("Idle")
+        self._status_label = QLabel("Aguardando")
         self._status_label.setStyleSheet("color: #a89984;")
 
         ctrl_row.addWidget(self._btn_start)
@@ -105,7 +105,7 @@ class FileWatcherPanel(QWidget):
 
         # ── job table ────────────────────────────────────────────────────
         self._table = QTableWidget(0, 3)
-        self._table.setHorizontalHeaderLabels(["File", "Progress", "Status"])
+        self._table.setHorizontalHeaderLabels(["Arquivo", "Progresso", "Status"])
         self._table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
         self._table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)
         self._table.horizontalHeader().resizeSection(1, 180)
@@ -151,11 +151,11 @@ class FileWatcherPanel(QWidget):
         output = self._txt_output.text().strip()
 
         if not watch:
-            self._status_label.setText("⚠ Select a watch folder first")
+            self._status_label.setText("⚠ Selecione uma pasta para monitorar")
             self._status_label.setStyleSheet("color: #fb4934;")
             return
         if not output:
-            self._status_label.setText("⚠ Select an output folder first")
+            self._status_label.setText("⚠ Selecione uma pasta de saída")
             self._status_label.setStyleSheet("color: #fb4934;")
             return
 
@@ -169,13 +169,13 @@ class FileWatcherPanel(QWidget):
         self._btn_browse_watch.setEnabled(False)
         self._btn_browse_out.setEnabled(False)
 
-        self._status_label.setText("👁  Watching...")
+        self._status_label.setText("👁  Monitorando...")
         self._status_label.setStyleSheet("color: #b8bb26;")
 
     def _on_stop(self) -> None:
         # watcher.stop() joins threads (up to 8s) — must not block the UI thread
         self._btn_stop.setEnabled(False)
-        self._status_label.setText("Stopping…")
+        self._status_label.setText("Parando…")
         self._status_label.setStyleSheet("color: #fabd2f;")
         threading.Thread(target=self._stop_worker, daemon=True, name="fw-stop").start()
 
@@ -191,7 +191,7 @@ class FileWatcherPanel(QWidget):
         self._txt_output.setEnabled(True)
         self._btn_browse_watch.setEnabled(True)
         self._btn_browse_out.setEnabled(True)
-        self._status_label.setText("Stopped")
+        self._status_label.setText("Parado")
         self._status_label.setStyleSheet("color: #a89984;")
 
     # ── job listener (called from worker thread) ─────────────────────────
@@ -235,9 +235,9 @@ class FileWatcherPanel(QWidget):
             if job.status == "error":
                 label = f"✗ {job.error_msg[:30]}"
             elif job.status == "done":
-                label = "✓ Done"
+                label = "✓ Concluído"
             elif job.status == "processing":
-                label = "⏳ Processing"
+                label = "⏳ Processando"
             status_item.setText(label)
 
         self._table.scrollToBottom()

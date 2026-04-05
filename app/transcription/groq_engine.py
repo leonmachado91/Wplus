@@ -7,7 +7,7 @@ import io
 import logging
 import time
 import threading
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING, Callable, Optional
 
 from groq import AsyncGroq, RateLimitError, APIStatusError
 
@@ -52,12 +52,14 @@ class TranscriptionEngine:
 
     def __init__(
         self,
-        settings: SettingsManager,
-        buffer: TranscriptBuffer,
+        settings: "SettingsManager",
+        buffer: Optional["TranscriptBuffer"] = None,
         sample_rate: int = 16000,
+        on_segment: Optional[Callable[["TranscriptSegment"], None]] = None,
     ) -> None:
         self._settings = settings
         self._buffer = buffer
+        self._on_segment = on_segment
         self.sample_rate = sample_rate
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
@@ -71,6 +73,20 @@ class TranscriptionEngine:
         self._stop_event: Optional[asyncio.Event] = None
         self._ready = threading.Event()
         self._client: Optional[AsyncGroq] = None
+
+        # Rolling context: texto do último segmento válido (P1/P3)
+        self._last_segment_text: str = ""
+        self._last_segment_lock = threading.Lock()
+
+    def reset_context(self) -> None:
+        """P2: Limpa o contexto dinâmico entre sessões.
+
+        Deve ser chamado sempre que uma nova sessão de gravação começa,
+        para evitar que o contexto da sessão anterior influencie a nova.
+        """
+        with self._last_segment_lock:
+            self._last_segment_text = ""
+        logger.debug("Transcription context reset para nova sessão")
 
     # ── lifecycle ────────────────────────────────────────────────────────
 
@@ -155,10 +171,25 @@ class TranscriptionEngine:
             logger.error("No Groq client — skipping transcription")
             return
 
-        model = self._settings.get("api", "groq_model")
-        language = self._settings.get("api", "groq_language")
-        prompt = self._settings.get("api", "groq_prompt")
+        model       = self._settings.get("api", "groq_model")
+        language    = self._settings.get("api", "groq_language")
+        base_prompt = self._settings.get("api", "groq_prompt") or ""
         temperature = self._settings.get("api", "groq_temperature")
+
+        # Rolling context: combina o prompt estático com o contexto dinâmico do último segmento.
+        # O Whisper usa apenas os últimos ~224 tokens do prompt — truncamos para ≈1200 chars (~220 tok)
+        # para garantir que a parte mais recente da conversa sempre caiba.
+        with self._last_segment_lock:
+            last_text = self._last_segment_text
+
+        if last_text:
+            dynamic_prompt = f"{base_prompt} {last_text}".strip() if base_prompt else last_text
+        else:
+            dynamic_prompt = base_prompt
+
+        # Trunca pela direita para respeitar o limite de 224 tokens (~1200 chars)
+        if len(dynamic_prompt) > 1200:
+            dynamic_prompt = dynamic_prompt[-1200:]
 
         # retry with exponential backoff
         for attempt in range(3):
@@ -174,23 +205,42 @@ class TranscriptionEngine:
                     timestamp_granularities=["word", "segment"],
                     temperature=temperature,
                 )
-                # Only pass language/prompt when explicitly set — empty string
-                # causes Groq to reject the request with a 400 error.
                 if language:
                     kwargs["language"] = language
-                if prompt:
-                    kwargs["prompt"] = prompt
+                if dynamic_prompt:
+                    kwargs["prompt"] = dynamic_prompt
 
                 response = await self._client.audio.transcriptions.create(**kwargs)
 
                 segment = self._response_to_segment(response, meta)
                 if segment:
-                    self._buffer.add_segment(segment)
-                    logger.info("Transcribed: [%.1f-%.1f] %s", segment.start_time, segment.end_time, segment.text[:80])
+                    # Atualiza o contexto dinâmico APENAS se o segmento tem conteúdo suficiente.
+                    # Chunks muito curtos (interjeições, ruídos) não devem contaminar o contexto
+                    # porque erros de transcrição nesses chunks criam feedback loops.
+                    segment_words = len(segment.text.split())
+                    if segment_words >= 5:
+                        with self._last_segment_lock:
+                            combined = (self._last_segment_text + " " + segment.text).strip()
+                            self._last_segment_text = combined[-600:] if len(combined) > 600 else combined
+
+                    if self._buffer is not None:
+                        self._buffer.add_segment(segment)
+                    if self._on_segment is not None:
+                        try:
+                            self._on_segment(segment)
+                        except Exception:
+                            logger.exception("on_segment callback error")
+
+                    conf_str = f"{segment.confidence:.2f}" if segment.confidence is not None else "n/a"
+                    logger.info(
+                        "Transcribed [%.1f-%.1fs] conf=%s words=%d: %s",
+                        segment.start_time, segment.end_time, conf_str,
+                        len(segment.text.split()), segment.text[:100]
+                    )
 
                 return
 
-            except RateLimitError as e:
+            except RateLimitError:
                 wait = (2 ** attempt) * 2
                 logger.warning("Groq rate limit hit, waiting %ds (attempt %d/3)", wait, attempt + 1)
                 await asyncio.sleep(wait)
@@ -211,11 +261,67 @@ class TranscriptionEngine:
                 else:
                     return
 
+    def _is_hallucination(self, text: str, prev_text: str, confidence: float = 0.0) -> bool:
+        """Detecta alucinações comuns do Whisper incluindo similaridade fuzzy.
+
+        As listas de frases são lidas das settings em tempo de execução,
+        permitindo que o usuário as configure pela UI sem reiniciar o app.
+        """
+        from difflib import SequenceMatcher
+
+        text_lower = text.lower().strip()
+
+        # Lê as listas das settings (configuráveis pela UI)
+        filters = self._settings.get("filters")
+        prefixes = [p.lower() for p in (filters.get("hallucination_prefixes") or [])]
+        exact_set = {p.lower() for p in (filters.get("hallucination_exact") or [])}
+
+        # 1. Prefixos: filtra quando a frase INICIA o texto
+        for phrase in prefixes:
+            if text_lower == phrase or text_lower.startswith(phrase + " "):
+                return True
+
+        # 2. Exact-match: só filtra quando é o texto COMPLETO do segmento
+        # Ex: "e aí" sozinho = ruído; "e aí, você viu?" = fala real
+        if text_lower in exact_set:
+            return True
+
+        # 3. Repetição exata do segmento anterior
+        if prev_text and text_lower == prev_text.strip().lower():
+            return True
+
+        # 4. P3: Similaridade fuzzy com o segmento anterior (> 85%)
+        if prev_text and len(text_lower) > 10 and len(prev_text) > 10:
+            ratio = SequenceMatcher(None, text_lower, prev_text.lower().strip()).ratio()
+            if ratio > 0.85:
+                logger.debug("Similaridade %.0f%% com segmento anterior — descartado", ratio * 100)
+                return True
+
+        # 5. Texto muito curto (< 3 chars)
+        if len(text_lower.replace(" ", "")) < 3:
+            return True
+
+        # 6. Palavra repetida 4+ vezes na mesma frase
+        words = text_lower.split()
+        if len(words) >= 4:
+            for word in set(words):
+                if words.count(word) >= 4 and len(word) > 2:
+                    return True
+
+        return False
+
     def _response_to_segment(self, response: object, meta: dict) -> Optional[TranscriptSegment]:
         """Convert Groq verbose_json response to TranscriptSegment."""
         text = getattr(response, "text", "").strip()
         if not text:
             logger.debug("Empty transcription, skipping")
+            return None
+
+        # Filtra alucinações antes de prosseguir (antes de calcular confidence)
+        with self._last_segment_lock:
+            prev = self._last_segment_text
+        if self._is_hallucination(text, prev):
+            logger.warning("Alucinação detectada e descartada: %r", text[:100])
             return None
 
         session_offset = meta.get("start_time", 0.0)
@@ -233,25 +339,47 @@ class TranscriptionEngine:
 
         # extract segment-level timestamps
         raw_segments = getattr(response, "segments", None) or []
+
+        # Fix: usa None como sentinel para avg_logprob
+        # avg_logprob=0.0 é válido (significa log-prob perfeito), não pode ser usado como flag
+        avg_logprob: "float | None" = None
         seg_start = session_offset
-        seg_end = meta.get("end_time", session_offset)
-        avg_logprob = 0.0
+
+        # Fix: calcula end_time via duration_ms quando raw_segments não traz timestamps
+        # (Groq frequentemente omite isso em chunks curtos, causando start==end no log)
+        duration_s = meta.get("duration_ms", 0) / 1000.0
+        seg_end = session_offset + duration_s if duration_s else session_offset
 
         if raw_segments:
             first_seg = raw_segments[0]
             last_seg = raw_segments[-1]
-            seg_start = session_offset + getattr(first_seg, "start", 0.0)
-            seg_end = session_offset + getattr(last_seg, "end", 0.0)
-            # average confidence from log probabilities
-            logprobs = [getattr(s, "avg_logprob", 0.0) for s in raw_segments]
-            if logprobs:
-                import math
-                avg_logprob = sum(logprobs) / len(logprobs)
+            raw_start = getattr(first_seg, "start", None)
+            raw_end = getattr(last_seg, "end", None)
+            if raw_start is not None:
+                seg_start = session_offset + raw_start
+            if raw_end is not None and raw_end > 0:
+                seg_end = session_offset + raw_end
 
-        # convert avg_logprob to confidence (0-1)
+            logprobs = [getattr(s, "avg_logprob", None) for s in raw_segments]
+            valid_logprobs = [lp for lp in logprobs if lp is not None]
+            if valid_logprobs:
+                avg_logprob = sum(valid_logprobs) / len(valid_logprobs)
+
         import math
-        confidence = math.exp(avg_logprob) if avg_logprob else 0.0
-        confidence = min(max(confidence, 0.0), 1.0)
+        if avg_logprob is not None:
+            confidence: "float | None" = min(max(math.exp(avg_logprob), 0.0), 1.0)
+        else:
+            confidence = None  # Groq não retornou logprob — não aplica filtro de threshold
+
+
+        # P1: Filtro por confiança — só aplica se temos logprob real (não None)
+        confidence_threshold = float(self._settings.get("api", "confidence_threshold") or 0.0)
+        if confidence_threshold > 0.0 and confidence is not None and confidence < confidence_threshold:
+            logger.warning(
+                "Segmento descartado por baixa confiança: conf=%.3f < threshold=%.2f | %r",
+                confidence, confidence_threshold, text[:80]
+            )
+            return None
 
         # Use the pre-assigned segment_id from meta so that the Diarization
         # engine (which received the same meta) can match and update this segment.

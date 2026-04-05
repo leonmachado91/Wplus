@@ -45,7 +45,7 @@ class TranscriptWidget(QTextEdit):
         self._speaker_color_map: dict[str, str] = {}
         self._next_color_idx = 0
         self._processing_visible = False
-        # seg_id → {"tc": str, "speaker": str, "text": str}
+        # seg_id → {"tc": str, "speaker": str, "text": str, "sub_segments": list[dict]}
         self._segment_cache: dict[str, dict] = {}
         self._speaker_mapper = None
 
@@ -67,36 +67,50 @@ class TranscriptWidget(QTextEdit):
         tc = self._format_timecode(segment.get("start_time", 0.0))
         speaker = segment.get("speaker") or ""
         text = segment.get("text", "")
+        sub_segments = segment.get("sub_segments") or []
 
-        self._segment_cache[seg_id] = {"tc": tc, "speaker": speaker, "text": text}
+        self._segment_cache[seg_id] = {
+            "tc": tc,
+            "speaker": speaker,
+            "text": text,
+            "sub_segments": sub_segments,
+        }
 
-        html = self._build_segment_html(seg_id, tc, speaker, text)
+        html = self._build_segment_html(seg_id, tc, speaker, text, sub_segments)
         self.append(f'<div id="{seg_id}">{html}</div>')
 
         if self._auto_scroll:
             self._scroll_to_bottom()
 
     def update_segment(self, segment_id: str, updates: dict) -> None:
-        """Update speaker label after diarization and trigger a full rerender."""
+        """Update speaker label (and optionally sub_segments) after diarization."""
         speaker = updates.get("speaker")
-        if not speaker or segment_id not in self._segment_cache:
+        sub_segments = updates.get("sub_segments")  # may be a list or None
+
+        if segment_id not in self._segment_cache:
+            return
+        if not speaker and sub_segments is None:
             return
 
         cached = self._segment_cache[segment_id]
-        old_speaker = cached.get("speaker", "")
-        if old_speaker == speaker:
-            return  # nothing changed
+        changed = False
 
-        # Update the cache entry
-        cached["speaker"] = speaker
+        if speaker and cached.get("speaker") != speaker:
+            cached["speaker"] = speaker
+            changed = True
+
+        if sub_segments is not None and cached.get("sub_segments") != sub_segments:
+            cached["sub_segments"] = sub_segments
+            changed = True
+
         if "text" in updates:
             cached["text"] = updates["text"]
         if "start_time" in updates:
             cached["tc"] = self._format_timecode(updates["start_time"])
 
-        # Qt's toHtml() does not preserve id attributes on div elements, so
-        # targeted string-replacement is unreliable. Full rerender is the only
-        # correct approach for applying post-diarization speaker label updates.
+        if not changed:
+            return
+
         scroll_pos = self.verticalScrollBar().value() if not self._auto_scroll else None
         self._full_rerender()
         if not self._auto_scroll and scroll_pos is not None:
@@ -137,7 +151,40 @@ class TranscriptWidget(QTextEdit):
 
     # ── internals ────────────────────────────────────────────────────────
 
-    def _build_segment_html(self, _seg_id: str, tc: str, speaker: str, text: str) -> str:
+    def _build_segment_html(
+        self,
+        _seg_id: str,
+        tc: str,
+        speaker: str,
+        text: str,
+        sub_segments: list | None = None,
+    ) -> str:
+        """Build HTML for a segment.
+
+        When ``sub_segments`` is populated, render each span as its own line
+        with the span's speaker and text.  The first span reuses ``tc`` (the
+        chunk start timecode); subsequent spans show their own timecode.
+        When empty, render the classic single-speaker line.
+        """
+        if sub_segments:
+            # Drop any span with empty text before rendering.
+            # This can happen when Groq returns word entries with empty strings,
+            # making the reconstructed span text empty after join+strip.
+            valid_spans = [s for s in sub_segments if s.get("text", "").strip()]
+            if valid_spans:
+                lines = []
+                for i, span in enumerate(valid_spans):
+                    span_tc = tc if i == 0 else self._format_timecode(span.get("start", 0.0))
+                    span_speaker = span.get("speaker", "")
+                    span_text = span.get("text", "")
+                    lines.append(self._build_single_line(span_tc, span_speaker, span_text))
+                return "<br>".join(lines)
+            # All spans had empty text — fall through to single-speaker render below.
+
+        return self._build_single_line(tc, speaker, text)
+
+    def _build_single_line(self, tc: str, speaker: str, text: str) -> str:
+        """Render a single speaker line: [timecode] Speaker  text."""
         parts = [f'<span style="color:{TIMECODE_COLOR};font-size:8pt;">[{tc}]</span>']
 
         if speaker:
@@ -158,7 +205,13 @@ class TranscriptWidget(QTextEdit):
         """Full rebuild fallback — only used when targeted replacement fails."""
         blocks = []
         for seg_id, data in self._segment_cache.items():
-            html = self._build_segment_html(seg_id, data["tc"], data.get("speaker", ""), data["text"])
+            html = self._build_segment_html(
+                seg_id,
+                data["tc"],
+                data.get("speaker", ""),
+                data["text"],
+                data.get("sub_segments"),
+            )
             blocks.append(f'<div id="{seg_id}">{html}</div>')
         self.setHtml("<body style='background:#282828;'>" + "".join(blocks) + "</body>")
         if self._auto_scroll:
