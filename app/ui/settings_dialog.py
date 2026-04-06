@@ -283,17 +283,14 @@ class SettingsDialog(QDialog):
         self._ui_elements["audio"]["save_debug_audio"] = debug_save_cb
         layout.addRow("Debug:", debug_save_cb)
 
-        aec_cb = QCheckBox("Usar AEC nativo do Windows (cancelamento de eco)")
+        aec_cb = QCheckBox("Habilitar Cancelamento Acústico de Eco (AEC)")
         aec_cb.setToolTip(
-            "Quando ativado, o microfone é aberto através do dispositivo de Comunicações do\n"
-            "Windows (role eCommunications). Isso ativa o pipeline de processamento de áudio\n"
-            "do Windows: AEC (cancelamento de eco), supressão de ruído e AGC.\n\n"
-            "Recomendado ao usar 'Mic + Sistema' em reuniões com caixas de som abertas.\n\n"
-            "Limitações:\n"
-            "• Depende do driver do microfone suportar o processamento Windows\n"
-            "• Se o dispositivo de Comunicações não for encontrado, o mic selecionado é usado\n"
-            "• Não substitui o uso de fones de ouvido, mas reduz significativamente o eco\n\n"
-            "Padrão: desativado (sem impacto na qualidade se desligado)."
+            "Quando ativado no modo 'Mic + Sistema', o aplicativo utiliza um filtro\n"
+            "adaptativo (NLMS) interno via software para suprimir o som do sistema\n"
+            "que vaza pelas suas caixas de som de volta ao microfone.\n\n"
+            "Isso limpa significativamente os ecos e impede que vozes vindas de pessoas\n"
+            "na mesma call reproduzam transcrições duplicadas, com apenas ~3s de aquecimento inicial.\n\n"
+            "Não tem impacto de CPU e não depende do Windows."
         )
         self._ui_elements["audio"]["use_windows_aec"] = aec_cb
         layout.addRow("Cancelamento de Eco:", aec_cb)
@@ -540,13 +537,13 @@ class SettingsDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
-        enabled_cb = QCheckBox("Habilitar Filtros de Alucinação")
-        enabled_cb.setToolTip(
-            "Se desativado, o aplicativo irá transcrever absolutamente tudo, "
-            "incluindo os ruídos repetitivos (ex: 'thanks for watching')."
+        enable_pref_cb = QCheckBox("Habilitar Filtro por Prefixo")
+        enable_pref_cb.setToolTip(
+            "Se desativado, o aplicativo irá transcrever absolutamente tudo que tenha esse prefixo,\n"
+            "incluindo os ruídos repetitivos do YouTube (ex: 'thanks for watching')."
         )
-        self._ui_elements["filters"]["enabled"] = enabled_cb
-        layout.addWidget(enabled_cb)
+        self._ui_elements["filters"]["enable_prefixes"] = enable_pref_cb
+        layout.addWidget(enable_pref_cb)
 
         layout.addWidget(QLabel("<b>Filtro por Prefixo</b> — descarta quando o texto <i>começa</i> com a frase:"))
         self._filter_prefixes_edit = QPlainTextEdit()
@@ -557,6 +554,16 @@ class SettingsDialog(QDialog):
         )
         self._filter_prefixes_edit.setMaximumHeight(140)
         layout.addWidget(self._filter_prefixes_edit)
+        
+        # Spacer visual
+        layout.addSpacing(15)
+
+        enable_exact_cb = QCheckBox("Habilitar Filtro Exact-Match")
+        enable_exact_cb.setToolTip(
+            "Se desativado, frases exatas muito curtas não serão descartadas automaticamente."
+        )
+        self._ui_elements["filters"]["enable_exact"] = enable_exact_cb
+        layout.addWidget(enable_exact_cb)
 
         layout.addWidget(QLabel("<b>Filtro Exact-Match</b> — descarta quando o texto <i>é apenas</i> a frase:"))
         self._filter_exact_edit = QPlainTextEdit()

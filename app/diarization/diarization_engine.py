@@ -287,16 +287,26 @@ class DiarizationEngine:
         """Collapse adjacent windows that share the same speaker into a single span.
 
         This reduces noise from window border effects where the same speaker
-        gets split across two consecutive windows.
+        gets split across two consecutive windows. Overlaps between different 
+        speakers are resolved by cutting exactly at the midpoint.
         """
         if not anns:
             return anns
         merged = [anns[0].copy()]
         for a in anns[1:]:
             if a["speaker"] == merged[-1]["speaker"]:
-                merged[-1]["end"] = a["end"]  # extend current span
+                merged[-1]["end"] = max(merged[-1]["end"], a["end"])  # extend current span
             else:
                 merged.append(a.copy())
+
+        # Remove overlaps between different speakers
+        for i in range(len(merged) - 1):
+            if merged[i]["end"] > merged[i+1]["start"]:
+                # Cut at the midpoint of the overlap
+                midpoint = (merged[i]["end"] + merged[i+1]["start"]) / 2.0
+                merged[i]["end"] = midpoint
+                merged[i+1]["start"] = midpoint
+
         return merged
 
     def _extract_embedding(self, waveform, sample_rate: int) -> Optional[np.ndarray]:

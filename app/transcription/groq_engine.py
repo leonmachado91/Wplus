@@ -222,11 +222,14 @@ class TranscriptionEngine:
         else:
             dynamic_prompt = base_prompt
 
-        # Trunca pela direita: mantém o texto mais recente dentro do limite
-        if len(dynamic_prompt) > _GROQ_PROMPT_LIMIT:
-            dynamic_prompt = dynamic_prompt[-_GROQ_PROMPT_LIMIT:]
+        # Trunca pela direita considerando o peso real em bytes (UTF-8) para alinhar 
+        # com a contagem do servidor Groq (evitando passar do limite por causa de acentos).
+        prompt_bytes = dynamic_prompt.encode("utf-8")
+        if len(prompt_bytes) > _GROQ_PROMPT_LIMIT:
+            # Pega os últimos bytes e resolve qualquer caractere partido 
+            dynamic_prompt = prompt_bytes[-_GROQ_PROMPT_LIMIT:].decode("utf-8", errors="ignore")
             logger.debug(
-                "Prompt truncado para %d chars (limite Groq)", _GROQ_PROMPT_LIMIT
+                "Prompt truncado em bytes para %d (limite Groq)", _GROQ_PROMPT_LIMIT
             )
 
         # retry with exponential backoff
@@ -317,13 +320,15 @@ class TranscriptionEngine:
         exact_set = {p.lower() for p in (filters.get("hallucination_exact") or [])}
 
         # 1. Prefixos: filtra quando a frase INICIA o texto
-        for phrase in prefixes:
-            if raw_text_lower == phrase or raw_text_lower.startswith(phrase + " "):
-                return True
+        if filters.get("enable_prefixes", True):
+            for phrase in prefixes:
+                if raw_text_lower == phrase or raw_text_lower.startswith(phrase + " "):
+                    return True
 
         # 2. Exact-match: usa versão sanitizada (stripped) para não ser enganado por pontuação
-        if stripped_lower in exact_set:
-            return True
+        if filters.get("enable_exact", True):
+            if stripped_lower in exact_set:
+                return True
 
         # 3. Repetição e fuzzy match contra a janela de histórico
         if recent_texts and len(raw_text_lower) > 6:
@@ -361,15 +366,12 @@ class TranscriptionEngine:
             logger.debug("Empty transcription, skipping")
             return None
 
-        # Filtra alucinações antes de prosseguir (antes de calcular confidence)
-        use_filters = self._settings.get("filters", "enabled")
-        
-        if use_filters:
-            with self._last_segment_lock:
-                recent_texts = list(self._recent_texts)
-            if self._is_hallucination(text, recent_texts):
-                logger.warning("Alucinação detectada e descartada: %r", text[:100])
-                return None
+        # Filtra alucinações (prefixo/exato dependem de config, outras regras rodam sempre)
+        with self._last_segment_lock:
+            recent_texts = list(self._recent_texts)
+        if self._is_hallucination(text, recent_texts):
+            logger.warning("Alucinação detectada e descartada: %r", text[:100])
+            return None
 
         session_offset = meta.get("start_time", 0.0)
         chunk_was_forced = meta.get("chunk_was_forced", False)

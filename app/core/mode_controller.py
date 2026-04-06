@@ -512,13 +512,47 @@ class ModeController:
         spans: list[SpeakerSpan] = []
         full_text_words = full_text.split() if full_text else []
 
-        for ann in annotations:
-            indices = [
-                i for i, w in enumerate(words)
-                if ann["start"] <= w.start < ann["end"]
-            ]
-            if not indices:
-                continue
+        for j, ann in enumerate(annotations):
+            ann_start = ann["start"]
+            ann_end = ann["end"]
+
+            # If it's the last annotation, it takes everything until the end
+            if j == len(annotations) - 1:
+                indices = [i for i, w in enumerate(words) if (w.start + w.end) / 2.0 >= ann_start]
+            else:
+                # Find the 'smartest' index to make the cut for this boundary
+                best_cut_idx = len(words)
+                best_score = float("inf")
+                
+                for i in range(len(words)):
+                    w = words[i]
+                    w_mid = (w.start + w.end) / 2.0
+                    
+                    # Only consider cuts that are reasonably close (within 1.5s) to the mathematical boundary
+                    time_diff = abs(w_mid - ann_end)
+                    if time_diff > 1.5:
+                        continue
+                        
+                    # Calculate punctuation bonus if we cut BEFORE word i
+                    # This means the previous word (i-1) ended the previous speaker's turn
+                    bonus = 0.0
+                    if i > 0:
+                        prev_word = words[i-1].word.strip()
+                        if prev_word.endswith(('.', '!', '?')):
+                            bonus = 1.0  # Huge bonus for strong punctuation
+                        elif prev_word.endswith((',', ';', ':')):
+                            bonus = 0.4  # Moderate bonus for pauses
+                            
+                    score = time_diff - bonus
+                    if score < best_score:
+                        best_score = score
+                        best_cut_idx = i
+
+                # Gather words for this speaker
+                indices = [
+                    i for i, w in enumerate(words)
+                    if (w.start + w.end) / 2.0 >= ann_start and i < best_cut_idx
+                ]
 
             # Try word-level text from WordTimestamp.word (populated by groq_engine)
             text = " ".join(words[i].word for i in indices).strip()

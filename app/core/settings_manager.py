@@ -102,7 +102,8 @@ class UISettings(BaseModel):
 class FiltersSettings(BaseModel):
     """Listas de frases que o filtro de alucinações usa para descartar segmentos."""
 
-    enabled: bool = True
+    enable_prefixes: bool = True
+    enable_exact: bool = True
 
     # Filtradas quando INICIAM o texto (prefixo)
     hallucination_prefixes: list[str] = Field(default_factory=lambda: [

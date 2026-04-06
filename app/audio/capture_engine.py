@@ -57,6 +57,7 @@ class AudioCaptureEngine:
         self._mic_frames: Optional[queue.Queue] = None
         self._loop_frames: Optional[queue.Queue] = None
         self._mixer_thread: Optional[threading.Thread] = None
+        self._aec_filter = None  # Software AEC engine
 
         # ── AGC (Automatic Gain Control) ────────────────────────────────────
         # Smoothed, per-session gain applied to mic frames only.  Noise-gated so
@@ -65,8 +66,8 @@ class AudioCaptureEngine:
         self._agc_target_rms: float = 0.12   # target level in float32 [-1,1] space
         self._agc_max_gain: float = 8.0      # absolute ceiling to prevent blowout
         self._agc_noise_gate: float = 0.003  # RMS below this = silence, skip
-        self._agc_attack: float = 0.08       # fraction per frame — fast onset
-        self._agc_release: float = 0.004     # fraction per frame — slow falloff
+        self._agc_attack: float = 0.5        # fraction per frame — almost instant drop for loud peaks
+        self._agc_release: float = 0.01      # fraction per frame — slow falloff/lift for quiet parts
         self._agc_gain: float = 1.0          # current smoothed gain (reset each session)
 
     # ── public API ───────────────────────────────────────────────────────
@@ -110,8 +111,15 @@ class AudioCaptureEngine:
                 # Sub-queues for the frame mixer — must exist before streams start.
                 self._mic_frames = queue.Queue(maxsize=50)
                 self._loop_frames = queue.Queue(maxsize=50)
+                
+                if use_windows_aec:
+                    from app.audio.software_aec import SoftwareAEC
+                    self._aec_filter = SoftwareAEC()
+                    logger.info("Software AEC (NLMS) filter initialized for 'both' mode")
+                else:
+                    self._aec_filter = None
 
-                self._start_mic(device_index, use_windows_aec=use_windows_aec)
+                self._start_mic(device_index)
                 try:
                     self._start_loopback()       # sets _pyaudio_stream + thread
                 except Exception:
@@ -140,29 +148,10 @@ class AudioCaptureEngine:
             elif mode == "loopback":
                 self._start_loopback()
             else:
-                self._start_mic(device_index, use_windows_aec=use_windows_aec)
+                self._start_mic(device_index)
 
-    def _start_mic(self, device_index: int | None, use_windows_aec: bool = False) -> None:
-        """Start capture from a microphone using sounddevice.
-
-        When ``use_windows_aec`` is True, the Windows Communications device is
-        queried and used instead of ``device_index``.  If the lookup fails the
-        original ``device_index`` is used unchanged.
-        """
-        if use_windows_aec:
-            from app.audio.windows_aec import get_communications_mic_sounddevice_index
-            aec_idx = get_communications_mic_sounddevice_index()
-            if aec_idx is not None:
-                logger.info(
-                    "Windows AEC enabled: using Communications mic [%d] instead of [%s]",
-                    aec_idx, device_index,
-                )
-                device_index = aec_idx
-            else:
-                logger.warning(
-                    "Windows AEC: Communications device not found — using selected device [%s]",
-                    device_index,
-                )
+    def _start_mic(self, device_index: int | None) -> None:
+        """Start capture from a microphone using sounddevice."""
 
         try:
             self._is_loopback = False
@@ -459,8 +448,8 @@ class AudioCaptureEngine:
 
         desired_gain = min(self._agc_target_rms / (rms + 1e-9), self._agc_max_gain)
 
-        # Asymmetric smoothing: attack faster than release
-        alpha = self._agc_attack if desired_gain > self._agc_gain else self._agc_release
+        # Asymmetric smoothing: attack fast (compress peaks), release slowly (recover gain)
+        alpha = self._agc_attack if desired_gain < self._agc_gain else self._agc_release
         self._agc_gain += alpha * (desired_gain - self._agc_gain)
 
         return np.clip(frame * self._agc_gain, -1.0, 1.0).astype(np.float32)
@@ -534,9 +523,15 @@ class AudioCaptureEngine:
                 loop_frame = None
 
             if loop_frame is not None:
+                # Se houver AEC ativado, subtrai o som da caixa (loopback) do som do mic.
+                if self._aec_filter is not None:
+                    mic_clean = self._aec_filter.process_frame(mic_frame, loop_frame)
+                else:
+                    mic_clean = mic_frame
+                    
                 # Proper acoustic mixing: sample-by-sample addition, clip to valid range.
                 mixed = np.clip(
-                    mic_frame.astype(np.float64) + loop_frame.astype(np.float64),
+                    mic_clean.astype(np.float64) + loop_frame.astype(np.float64),
                     -1.0, 1.0,
                 ).astype(np.float32)
                 self._enqueue_frame(mixed)
