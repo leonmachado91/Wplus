@@ -195,10 +195,12 @@ class TranscriptionEngine:
         base_prompt = self._settings.get("api", "groq_prompt") or ""
         temperature = self._settings.get("api", "groq_temperature")
 
-        # Rolling context: combina o prompt estático com o contexto dinâmico do último segmento.
-        # O Whisper usa apenas os últimos ~224 tokens do prompt — truncamos para ≈1200 chars (~220 tok)
-        # para garantir que a parte mais recente da conversa sempre caiba.
-        
+        # Rolling context: combina o prompt estático com o contexto dinâmico do último
+        # segmento. O Groq Whisper rejeita prompts com mais de 896 caracteres (HTTP 400).
+        # Truncamos pela direita para preservar o texto mais recente, que é o mais relevante.
+        _GROQ_PROMPT_LIMIT = 896
+
+        # Debug audio: salva o chunk bruto em disco para inspeção offline.
         if self._settings.get("audio", "save_debug_audio"):
             try:
                 _DEBUG_AUDIO_DIR.mkdir(exist_ok=True)
@@ -209,7 +211,7 @@ class TranscriptionEngine:
                 logger.debug("Debug audio saved to %s", filename)
             except Exception as e:
                 logger.error("Failed to save debug audio: %s", e)
-        
+
         use_rolling = self._settings.get("api", "use_rolling_context")
 
         with self._last_segment_lock:
@@ -220,9 +222,12 @@ class TranscriptionEngine:
         else:
             dynamic_prompt = base_prompt
 
-        # Trunca pela direita para respeitar o limite de 224 tokens (~1200 chars)
-        if len(dynamic_prompt) > 1200:
-            dynamic_prompt = dynamic_prompt[-1200:]
+        # Trunca pela direita: mantém o texto mais recente dentro do limite
+        if len(dynamic_prompt) > _GROQ_PROMPT_LIMIT:
+            dynamic_prompt = dynamic_prompt[-_GROQ_PROMPT_LIMIT:]
+            logger.debug(
+                "Prompt truncado para %d chars (limite Groq)", _GROQ_PROMPT_LIMIT
+            )
 
         # retry with exponential backoff
         for attempt in range(3):

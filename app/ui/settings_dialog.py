@@ -283,6 +283,21 @@ class SettingsDialog(QDialog):
         self._ui_elements["audio"]["save_debug_audio"] = debug_save_cb
         layout.addRow("Debug:", debug_save_cb)
 
+        aec_cb = QCheckBox("Usar AEC nativo do Windows (cancelamento de eco)")
+        aec_cb.setToolTip(
+            "Quando ativado, o microfone é aberto através do dispositivo de Comunicações do\n"
+            "Windows (role eCommunications). Isso ativa o pipeline de processamento de áudio\n"
+            "do Windows: AEC (cancelamento de eco), supressão de ruído e AGC.\n\n"
+            "Recomendado ao usar 'Mic + Sistema' em reuniões com caixas de som abertas.\n\n"
+            "Limitações:\n"
+            "• Depende do driver do microfone suportar o processamento Windows\n"
+            "• Se o dispositivo de Comunicações não for encontrado, o mic selecionado é usado\n"
+            "• Não substitui o uso de fones de ouvido, mas reduz significativamente o eco\n\n"
+            "Padrão: desativado (sem impacto na qualidade se desligado)."
+        )
+        self._ui_elements["audio"]["use_windows_aec"] = aec_cb
+        layout.addRow("Cancelamento de Eco:", aec_cb)
+
         return page
 
     def _build_vad_page(self) -> QWidget:

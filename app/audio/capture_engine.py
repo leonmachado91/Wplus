@@ -52,7 +52,12 @@ class AudioCaptureEngine:
 
     # ── public API ───────────────────────────────────────────────────────
 
-    def start(self, device_index: int | None = None, mode: str = "mic") -> None:
+    def start(
+        self,
+        device_index: int | None = None,
+        mode: str = "mic",
+        use_windows_aec: bool = False,
+    ) -> None:
         """Start capturing audio.
 
         Args:
@@ -61,6 +66,11 @@ class AudioCaptureEngine:
                   'both' starts mic AND WASAPI loopback simultaneously;
                   frames from both sources are interleaved in raw_pcm_queue
                   and the VAD processes them as a unified stream.
+            use_windows_aec: when True, override ``device_index`` with the
+                  Windows default *Communications* microphone, which causes
+                  Windows to apply its AEC / NS / AGC pipeline before
+                  delivering PCM. Falls back silently if the device cannot
+                  be determined.
         """
         with self._lock:
             if self._running:
@@ -68,7 +78,7 @@ class AudioCaptureEngine:
                 return
 
             if mode == "both":
-                self._start_mic(device_index)   # sets _stream, _running=True
+                self._start_mic(device_index, use_windows_aec=use_windows_aec)
                 try:
                     self._start_loopback()       # sets _pyaudio_stream + thread
                 except Exception:
@@ -89,10 +99,30 @@ class AudioCaptureEngine:
             elif mode == "loopback":
                 self._start_loopback()
             else:
-                self._start_mic(device_index)
+                self._start_mic(device_index, use_windows_aec=use_windows_aec)
 
-    def _start_mic(self, device_index: int | None) -> None:
-        """Start capture from a microphone using sounddevice."""
+    def _start_mic(self, device_index: int | None, use_windows_aec: bool = False) -> None:
+        """Start capture from a microphone using sounddevice.
+
+        When ``use_windows_aec`` is True, the Windows Communications device is
+        queried and used instead of ``device_index``.  If the lookup fails the
+        original ``device_index`` is used unchanged.
+        """
+        if use_windows_aec:
+            from app.audio.windows_aec import get_communications_mic_sounddevice_index
+            aec_idx = get_communications_mic_sounddevice_index()
+            if aec_idx is not None:
+                logger.info(
+                    "Windows AEC enabled: using Communications mic [%d] instead of [%s]",
+                    aec_idx, device_index,
+                )
+                device_index = aec_idx
+            else:
+                logger.warning(
+                    "Windows AEC: Communications device not found — using selected device [%s]",
+                    device_index,
+                )
+
         try:
             self._is_loopback = False
             self._stream = sd.InputStream(

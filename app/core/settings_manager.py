@@ -33,6 +33,7 @@ class AudioSettings(BaseModel):
     sample_rate: int = 16000
     channels: int = 1
     save_debug_audio: bool = False
+    use_windows_aec: bool = False   # open mic via Communications role for Windows AEC
 
 
 class VADSettings(BaseModel):

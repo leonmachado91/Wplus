@@ -129,7 +129,8 @@ class ModeController:
         self._engine.start()
         self._vad.start()
         self._chunk_asm.start()
-        self._capture.start(device_index=device_index, mode=mode)
+        use_aec = self._settings.get("audio", "use_windows_aec")
+        self._capture.start(device_index=device_index, mode=mode, use_windows_aec=use_aec)
 
         # Start diarization if enabled — reset cross-chunk speaker state for new session
         self._start_diarization_if_enabled()
@@ -234,7 +235,8 @@ class ModeController:
         self._float_engine.start()
         self._float_vad.start()
         self._float_chunk_asm.start()
-        self._float_capture.start(device_index=device_index, mode=mode)
+        use_aec = self._settings.get("audio", "use_windows_aec")
+        self._float_capture.start(device_index=device_index, mode=mode, use_windows_aec=use_aec)
 
         self._float_bridge_thread = threading.Thread(
             target=self._float_bridge_worker,
