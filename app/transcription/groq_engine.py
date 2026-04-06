@@ -378,10 +378,20 @@ class TranscriptionEngine:
         words: list[WordTimestamp] = []
         raw_words = getattr(response, "words", None) or []
         for w in raw_words:
+            # Groq SDK may return word entries as typed objects OR plain dicts
+            # depending on the SDK version.  Handle both to avoid silent empty strings.
+            if isinstance(w, dict):
+                word_text = w.get("word", "") or w.get("text", "")
+                word_start = w.get("start", 0.0)
+                word_end   = w.get("end", 0.0)
+            else:
+                word_text  = getattr(w, "word", "") or getattr(w, "text", "")
+                word_start = getattr(w, "start", 0.0)
+                word_end   = getattr(w, "end", 0.0)
             words.append(WordTimestamp(
-                word=getattr(w, "word", ""),
-                start=session_offset + getattr(w, "start", 0.0),
-                end=session_offset + getattr(w, "end", 0.0),
+                word=word_text,
+                start=session_offset + word_start,
+                end=session_offset + word_end,
             ))
 
         # extract segment-level timestamps

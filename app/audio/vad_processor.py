@@ -24,6 +24,12 @@ class VADProcessor:
       - fallback: force-emit after max_chunk_duration_s of continuous speech
     """
 
+    # Class-level cache: the model is heavy (∼8 MB JIT), loading it takes 0.5-1 s
+    # and requires a GitHub network call.  Caching at the class level means the
+    # model is loaded ONCE per Python process, not once per recording session.
+    _model_cache: Optional["torch.jit.ScriptModule"] = None
+    _model_cache_lock: threading.Lock = threading.Lock()
+
     def __init__(
         self,
         raw_pcm_queue: queue.Queue,
@@ -95,17 +101,53 @@ class VADProcessor:
     # ── model loading ────────────────────────────────────────────────────
 
     def _load_model(self) -> None:
-        if self._model is not None:
+        """Load Silero-VAD, using the class-level cache when available.
+
+        Strategy:
+          1. Return immediately if the class cache is already populated.
+          2. Otherwise call torch.hub.load() with network (downloads on first run).
+          3. If the network call fails (proxy error, no internet), retry with
+             skip_validation=True to load the model from the local disk cache.
+        """
+        if VADProcessor._model_cache is not None:
+            self._model = VADProcessor._model_cache
+            logger.info("Silero-VAD loaded from class cache (instant)")
             return
-        logger.info("Loading Silero-VAD model...")
-        t0 = time.monotonic()
-        model, _ = torch.hub.load(
-            "snakers4/silero-vad",
-            "silero_vad",
-            trust_repo=True,
-        )
-        self._model = model
-        logger.info("Silero-VAD loaded in %.1fs", time.monotonic() - t0)
+
+        with VADProcessor._model_cache_lock:
+            # Double-checked locking: another thread may have populated the cache
+            # between our first check and acquiring the lock.
+            if VADProcessor._model_cache is not None:
+                self._model = VADProcessor._model_cache
+                return
+
+            import torch
+            logger.info("Loading Silero-VAD model...")
+            t0 = time.monotonic()
+
+            try:
+                model, _ = torch.hub.load(
+                    "snakers4/silero-vad",
+                    "silero_vad",
+                    trust_repo=True,
+                )
+            except Exception as net_err:
+                logger.warning(
+                    "torch.hub network error (%s: %s) — retrying with local cache",
+                    type(net_err).__name__, net_err,
+                )
+                # skip_validation bypasses the GitHub connectivity check and loads
+                # the model directly from the on-disk hub cache.
+                model, _ = torch.hub.load(
+                    "snakers4/silero-vad",
+                    "silero_vad",
+                    trust_repo=True,
+                    skip_validation=True,
+                )
+
+            VADProcessor._model_cache = model
+            self._model = model
+            logger.info("Silero-VAD loaded in %.1fs", time.monotonic() - t0)
 
     # ── processing thread ────────────────────────────────────────────────
 

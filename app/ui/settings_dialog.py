@@ -298,6 +298,23 @@ class SettingsDialog(QDialog):
         self._ui_elements["audio"]["use_windows_aec"] = aec_cb
         layout.addRow("Cancelamento de Eco:", aec_cb)
 
+        normalize_cb = QCheckBox("Normalização automática de volume do microfone")
+        normalize_cb.setToolTip(
+            "Ativa o AGC (Automatic Gain Control) por software para o microfone.\n\n"
+            "Quando seu microfone tem volume muito baixo, essa opção amplifica\n"
+            "o sinal automaticamente para manter um nível de voz consistente,\n"
+            "melhorando a detecção de fala (VAD) e a qualidade da transcrição.\n\n"
+            "Como funciona:\n"
+            "• Calcula o nível sonoro de cada quadro de áudio (~32ms)\n"
+            "• Ajusta o ganho suavemente para atingir o nível alvo\n"
+            "• Não amplifica silêncio (noise gate automático)\n"
+            "• Limita o ganho máximo para evitar distorção\n\n"
+            "Recomendado: ativado para microfones de headset ou USB de baixo volume.\n"
+            "Desative se estiver usando um microfone profissional já configurado."
+        )
+        self._ui_elements["audio"]["mic_normalize"] = normalize_cb
+        layout.addRow("Normalização de Volume:", normalize_cb)
+
         return page
 
     def _build_vad_page(self) -> QWidget:

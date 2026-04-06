@@ -50,6 +50,24 @@ class AudioCaptureEngine:
         self._loopback_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
 
+        # Frame mixer — only active in 'both' mode.
+        # Each source pushes to its own sub-queue; the mixer thread pairs frames
+        # and adds them sample-by-sample before sending ONE frame to the VAD.
+        self._mic_frames: Optional[queue.Queue] = None
+        self._loop_frames: Optional[queue.Queue] = None
+        self._mixer_thread: Optional[threading.Thread] = None
+
+        # ── AGC (Automatic Gain Control) ────────────────────────────────────
+        # Smoothed, per-session gain applied to mic frames only.  Noise-gated so
+        # silence is never amplified.  disabled by default; enabled via start().
+        self._agc_enabled: bool = False
+        self._agc_target_rms: float = 0.12   # target level in float32 [-1,1] space
+        self._agc_max_gain: float = 8.0      # absolute ceiling to prevent blowout
+        self._agc_noise_gate: float = 0.003  # RMS below this = silence, skip
+        self._agc_attack: float = 0.08       # fraction per frame — fast onset
+        self._agc_release: float = 0.004     # fraction per frame — slow falloff
+        self._agc_gain: float = 1.0          # current smoothed gain (reset each session)
+
     # ── public API ───────────────────────────────────────────────────────
 
     def start(
@@ -57,6 +75,7 @@ class AudioCaptureEngine:
         device_index: int | None = None,
         mode: str = "mic",
         use_windows_aec: bool = False,
+        mic_normalize: bool = False,
     ) -> None:
         """Start capturing audio.
 
@@ -71,19 +90,31 @@ class AudioCaptureEngine:
                   Windows to apply its AEC / NS / AGC pipeline before
                   delivering PCM. Falls back silently if the device cannot
                   be determined.
+            mic_normalize: when True, apply software Automatic Gain Control
+                  to mic frames.  The smoothed gain is reset each call so
+                  back-to-back sessions start from unity gain.
         """
+        # Reset AGC per-session — avoids carrying stale gain across recordings.
+        self._agc_enabled = mic_normalize
+        self._agc_gain = 1.0
+        if mic_normalize:
+            logger.info("Mic AGC enabled (target_rms=%.2f, max_gain=%.1fx)",
+                        self._agc_target_rms, self._agc_max_gain)
         with self._lock:
             if self._running:
                 logger.warning("Capture already running, ignoring start()")
                 return
 
             if mode == "both":
+                # Sub-queues for the frame mixer — must exist before streams start.
+                self._mic_frames = queue.Queue(maxsize=50)
+                self._loop_frames = queue.Queue(maxsize=50)
+
                 self._start_mic(device_index, use_windows_aec=use_windows_aec)
                 try:
                     self._start_loopback()       # sets _pyaudio_stream + thread
                 except Exception:
-                    # Loopback failed after mic started — roll back the mic so
-                    # we don't leave the engine in a half-started state.
+                    # Loopback failed after mic started — roll back everything.
                     logger.exception(
                         "Loopback failed in 'both' mode — stopping mic and re-raising"
                     )
@@ -94,8 +125,17 @@ class AudioCaptureEngine:
                         except Exception:
                             pass
                         self._stream = None
+                    self._mic_frames = None
+                    self._loop_frames = None
                     self._running = False
                     raise
+
+                # Both streams running — start the frame mixer.
+                self._mixer_thread = threading.Thread(
+                    target=self._mixer_worker, daemon=True, name="frame-mixer"
+                )
+                self._mixer_thread.start()
+                logger.info("Frame mixer started for 'both' mode")
             elif mode == "loopback":
                 self._start_loopback()
             else:
@@ -259,8 +299,14 @@ class AudioCaptureEngine:
                 if src_sr != dst_sr:
                     mono = resample_poly(mono, up, down).astype(np.float32)
 
-                # enqueue
-                self._enqueue_frame(mono)
+                # In 'both' mode route to mixer; otherwise go direct to VAD.
+                if self._loop_frames is not None:
+                    try:
+                        self._loop_frames.put_nowait(mono)
+                    except queue.Full:
+                        pass  # mixer fell behind — drop this loopback frame
+                else:
+                    self._enqueue_frame(mono)
 
             except Exception:
                 if self._running:
@@ -273,6 +319,14 @@ class AudioCaptureEngine:
                 return
             self._running = False
 
+            # Stop the frame mixer first (it drives the VAD feed).
+            # The mixer thread checks _running and will exit within one frame (~50ms).
+            if self._mixer_thread:
+                self._mixer_thread.join(timeout=1)
+                self._mixer_thread = None
+            self._mic_frames = None
+            self._loop_frames = None
+
             # stop sounddevice stream
             if self._stream:
                 self._stream.stop()
@@ -282,7 +336,7 @@ class AudioCaptureEngine:
             # stop pyaudiowpatch loopback
             if self._pyaudio_stream:
                 self._pyaudio_stream.stop_stream()
-                
+
             if self._loopback_thread:
                 self._loopback_thread.join(timeout=2)
                 self._loopback_thread = None
@@ -365,7 +419,50 @@ class AudioCaptureEngine:
         else:
             frame = indata.flatten().copy()
 
-        self._enqueue_frame(frame)
+        # Apply AGC before routing so both the mixer AND the VAD see normalized audio.
+        frame = self._apply_agc(frame)
+
+        # In 'both' mode, route to the frame mixer instead of directly to the VAD.
+        if self._mic_frames is not None:
+            try:
+                self._mic_frames.put_nowait(frame)
+            except queue.Full:
+                pass  # mixer fell behind — drop this mic frame silently
+        else:
+            self._enqueue_frame(frame)
+
+    # ── AGC ──────────────────────────────────────────────────────────
+
+    def _apply_agc(self, frame: np.ndarray) -> np.ndarray:
+        """Apply smoothed Automatic Gain Control to a single mic frame.
+
+        Algorithm:
+          1. Noise gate — frames below ``_agc_noise_gate`` RMS are silence;
+             returning them unchanged avoids amplifying hiss between words.
+          2. Desired gain = target_rms / frame_rms, capped at max_gain.
+          3. Exponential smoothing with DIFFERENT attack/release rates:
+             - attack is faster (gain goes up quickly when speech starts)
+             - release is slower (gain falls gracefully, no sudden drop)
+          4. Clip output to [−1, 1] to prevent clipping artifacts.
+
+        Called from the sounddevice callback — must be lock-free and fast.
+        Float arithmetic on a 512-sample frame takes ~3 µs on a modern CPU.
+        """
+        if not self._agc_enabled:
+            return frame
+
+        rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+        if rms < self._agc_noise_gate:
+            # Silence: hold current gain but don't amplify
+            return frame
+
+        desired_gain = min(self._agc_target_rms / (rms + 1e-9), self._agc_max_gain)
+
+        # Asymmetric smoothing: attack faster than release
+        alpha = self._agc_attack if desired_gain > self._agc_gain else self._agc_release
+        self._agc_gain += alpha * (desired_gain - self._agc_gain)
+
+        return np.clip(frame * self._agc_gain, -1.0, 1.0).astype(np.float32)
 
     # ── shared queue write ───────────────────────────────────────────────
 
@@ -390,3 +487,46 @@ class AudioCaptureEngine:
             except queue.Full:
                 pass
             logger.debug("Audio queue full — dropped oldest frame")
+
+    # ── frame mixer (both mode) ────────────────────────────────────
+
+    def _mixer_worker(self) -> None:
+        """Pair mic + loopback frames and mix by sample-wise addition.
+
+        Root cause of the 'horror-movie glitch':
+            When both sources push frames independently to the same VAD queue,
+            the queue alternates between two completely different acoustic
+            environments every 32 ms.  The speech buffer the VAD accumulates
+            therefore oscillates between  room-mic silence and speaker audio —
+            producing severe, unintelligible distortion.
+
+        Fix:
+            Drive on mic frames (sounddevice delivers at a steady ~32 ms cadence).
+            For each mic frame, wait up to 20 ms for a matching loopback frame.
+            If both arrive: add sample-by-sample and clip to [−1, 1].
+            If only one arrives: push it alone (avoids stalling the VAD).
+            Result: the VAD always receives a single temporally-coherent stream.
+        """
+        while self._running:
+            # Drive on mic frames; sounddevice guarantees a steady cadence.
+            try:
+                mic_frame = self._mic_frames.get(timeout=0.05)   # type: ignore[union-attr]
+            except (queue.Empty, AttributeError):
+                continue  # engine stopping or queues cleared by stop()
+
+            # Wait briefly for a matching loopback frame (within half a frame = 16 ms).
+            try:
+                loop_frame = self._loop_frames.get(timeout=0.016)  # type: ignore[union-attr]
+            except (queue.Empty, AttributeError):
+                loop_frame = None
+
+            if loop_frame is not None:
+                # Proper acoustic mixing: sample-by-sample addition, clip to valid range.
+                mixed = np.clip(
+                    mic_frame.astype(np.float64) + loop_frame.astype(np.float64),
+                    -1.0, 1.0,
+                ).astype(np.float32)
+                self._enqueue_frame(mixed)
+            else:
+                # Loopback not yet ready (startup lag or clock drift) — use mic alone.
+                self._enqueue_frame(mic_frame)

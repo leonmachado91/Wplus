@@ -15,12 +15,28 @@ logger = logging.getLogger("main")
 
 # Isolate all Model and Cache downloads (PyTorch, HF, etc.) to the project folder
 import os
+import signal
 from pathlib import Path
 _models_dir = Path(".models").absolute()
 _models_dir.mkdir(parents=True, exist_ok=True)
 os.environ["HF_HOME"] = str(_models_dir / "huggingface")
 os.environ["TORCH_HOME"] = str(_models_dir / "torch")
 
+
+def _graceful_exit(sig, frame) -> None:  # noqa: ANN001
+    """SIGINT handler that exits before Intel MKL's Fortran runtime fires.
+
+    Without this, pressing Ctrl+C while pyannote/scipy is active triggers:
+        forrtl: error (200): program aborting due to control-C event
+    which prints a stack dump and exits with code 1.  Intercepting SIGINT here
+    and calling sys.exit(0) lets Python finish its own cleanup first.
+    """
+    logger.info("Interrupted — shutting down.")
+    logging.shutdown()
+    sys.exit(0)
+
+
+signal.signal(signal.SIGINT, _graceful_exit)
 
 def main() -> None:
     from PyQt6.QtWidgets import QApplication

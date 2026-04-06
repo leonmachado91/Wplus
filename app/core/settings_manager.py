@@ -34,6 +34,7 @@ class AudioSettings(BaseModel):
     channels: int = 1
     save_debug_audio: bool = False
     use_windows_aec: bool = False   # open mic via Communications role for Windows AEC
+    mic_normalize: bool = True      # software AGC to compensate low-volume microphones
 
 
 class VADSettings(BaseModel):

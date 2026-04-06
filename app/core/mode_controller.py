@@ -43,6 +43,12 @@ class ModeController:
         self._diarization_engine = None
         self._speaker_mapper = None
 
+        # Pending multi-speaker annotations: when diarization fires before Groq
+        # responds, the segment isn't in the buffer yet and word assignment is
+        # impossible.  We store the resolved annotation list here and retry as
+        # soon as the segment_final event arrives from the buffer.
+        self._pending_diarization: dict[str, list[dict]] = {}  # seg_id → annotations
+
         # External status listener — set by LivePanel to receive diarization messages
         self.on_diarization_status: Optional[Callable[[str], None]] = None
 
@@ -130,7 +136,9 @@ class ModeController:
         self._vad.start()
         self._chunk_asm.start()
         use_aec = self._settings.get("audio", "use_windows_aec")
-        self._capture.start(device_index=device_index, mode=mode, use_windows_aec=use_aec)
+        mic_normalize = self._settings.get("audio", "mic_normalize")
+        self._capture.start(device_index=device_index, mode=mode, use_windows_aec=use_aec,
+                            mic_normalize=bool(mic_normalize))
 
         # Start diarization if enabled — reset cross-chunk speaker state for new session
         self._start_diarization_if_enabled()
@@ -171,6 +179,13 @@ class ModeController:
             self._diarization_engine = None
         if self._speaker_mapper:
             self._speaker_mapper.reset()
+
+        # Clean up diarization retry state.
+        try:
+            self._buffer.remove_listener(self._on_buffer_for_diarization)
+        except (ValueError, Exception):
+            pass  # listener may not have been registered (e.g. diarization disabled)
+        self._pending_diarization.clear()
 
         if self._bridge_thread:
             self._bridge_thread.join(timeout=2)
@@ -316,6 +331,11 @@ class ModeController:
             )
             self._diarization_engine.start()
             logger.info("Diarization engine started.")
+
+            # Register buffer listener for diarization retry.
+            # When diarization finishes before Groq, we store the annotations and
+            # apply them the moment the segment (with words) arrives.
+            self._buffer.add_listener(self._on_buffer_for_diarization)
         except Exception as e:
             logger.error("Failed to start diarization: %s", e)
             self._diarization_engine = None
@@ -367,10 +387,28 @@ class ModeController:
         updates: dict = {"speaker": dominant}
 
         if len(resolved) > 1:
-            # Multi-speaker: try to build sub_segments from word timestamps
+            # Multi-speaker: try to build sub_segments from word timestamps.
             seg = self._buffer.get_segment(segment_id)
+            logger.debug(
+                "Sub-chunk check: seg=%s found=%s words=%d",
+                segment_id,
+                seg is not None,
+                len(seg.words) if seg else 0,
+            )
             if seg is not None and seg.words:
-                sub_segs = self._assign_words_to_speakers(seg.words, resolved)
+                sub_segs = self._assign_words_to_speakers(seg.words, resolved, full_text=seg.text)
+                logger.debug(
+                    "Sub-chunk assign: %s → %d sub_segs (from %d words, %d spans, "
+                    "word[0].start=%.2f word[0].word=%r ann[0].start=%.2f ann[0].end=%.2f)",
+                    segment_id,
+                    len(sub_segs),
+                    len(seg.words),
+                    len(resolved),
+                    seg.words[0].start if seg.words else -1,
+                    seg.words[0].word if seg.words else None,
+                    resolved[0]["start"],
+                    resolved[0]["end"],
+                )
                 if sub_segs:
                     updates["sub_segments"] = sub_segs
                     logger.info(
@@ -378,13 +416,14 @@ class ModeController:
                         segment_id, len(sub_segs),
                     )
             else:
-                # Words not yet available (Groq still pending) — store raw annotations
-                # for a second pass once the segment arrives in the buffer.
-                # For now we just log; the speaker label still gets applied via
-                # _pending_speakers in TranscriptBuffer.
+                # Segment missing or words not yet available — store for retry.
+                # _on_buffer_for_diarization will apply when segment_final fires.
+                self._pending_diarization[segment_id] = resolved
                 logger.debug(
-                    "Sub-chunk: segment %s words not available yet, skipping text split",
+                    "Diarization: %s stored as pending (seg_found=%s, words=%d)",
                     segment_id,
+                    seg is not None,
+                    len(seg.words) if seg else 0,
                 )
 
         logger.info("Diarization callback: %s → speaker=%s", segment_id, dominant)
@@ -392,44 +431,99 @@ class ModeController:
         if updated:
             logger.info("Diarization applied: %s (dominant=%s)", segment_id, dominant)
         else:
-            # A transcrição ainda não chegou ao buffer — o mecanismo de pending speaker
-            # vai aplicar o speaker quando o Groq responder. Isso é esperado.
+            # Segment not yet in buffer (Groq still pending).
+            # The buffer's _pending_speakers will apply the dominant speaker when
+            # the segment arrives.  For multi-speaker chunks we also store the full
+            # annotations so _on_buffer_for_diarization can retry word assignment.
+            if len(resolved) > 1 and segment_id not in self._pending_diarization:
+                self._pending_diarization[segment_id] = resolved
+                logger.debug(
+                    "Diarization: annotations stored as pending (not in buffer yet) for %s",
+                    segment_id,
+                )
+
+    def _on_buffer_for_diarization(self, event: str, data: dict) -> None:
+        """Buffer listener: retry word-level speaker assignment when segment arrives.
+
+        When diarization completes before Groq returns, `_on_diarization_result`
+        stores multi-speaker annotations in `_pending_diarization`.  Here we wait
+        for the matching `segment_final` event (fired by the buffer once the Groq
+        transcription is added), then cross the word timestamps with the stored
+        speaker spans to produce `sub_segments`.
+        """
+        if event != "segment_final":
+            return
+
+        seg_id = data.get("segment", {}).get("id")
+        if not seg_id or seg_id not in self._pending_diarization:
+            return
+
+        annotations = self._pending_diarization.pop(seg_id)
+        seg = self._buffer.get_segment(seg_id)
+        if seg is None or not seg.words:
             logger.debug(
-                "Diarization: segment %s ainda não no buffer (pending aplicado)",
-                segment_id,
+                "Diarization retry: segment %s has no word timestamps — skipping sub-split",
+                seg_id,
             )
+            return
+
+        sub_segs = self._assign_words_to_speakers(seg.words, annotations, full_text=seg.text)
+        if sub_segs:
+            self._buffer.update_segment(seg_id, sub_segments=sub_segs)
+            logger.info(
+                "Diarization retry applied: %s → %d speaker span(s)",
+                seg_id, len(sub_segs),
+            )
+        else:
+            logger.debug("Diarization retry: no valid word spans found for %s", seg_id)
 
     @staticmethod
     def _assign_words_to_speakers(
         words: list,
         annotations: list[dict],
+        full_text: str = "",
     ) -> list[SpeakerSpan]:
         """Cross-reference word timestamps with speaker time spans.
 
         For each annotation span, collect words whose ``start`` timestamp falls
         within [span.start, span.end) and reconstruct the spoken text.
-        Words that fall outside all spans (edge effects) are silently discarded.
+
+        When ``WordTimestamp.word`` is empty (older Groq SDK returns word objects
+        without text content in some configurations), falls back to extracting the
+        corresponding word slice from ``full_text`` by word index.
 
         Args:
             words: list of WordTimestamp from the Groq response.
             annotations: list of {start, end, speaker} dicts (already display-name resolved).
+            full_text: the segment's full transcription text — used as text fallback.
 
         Returns:
             Ordered list of SpeakerSpan objects. Empty spans (no words) are dropped.
         """
         spans: list[SpeakerSpan] = []
+        full_text_words = full_text.split() if full_text else []
+
         for ann in annotations:
-            span_words = [
-                w for w in words
+            indices = [
+                i for i, w in enumerate(words)
                 if ann["start"] <= w.start < ann["end"]
             ]
-            if not span_words:
+            if not indices:
                 continue
-            text = " ".join(w.word for w in span_words).strip()
+
+            # Try word-level text from WordTimestamp.word (populated by groq_engine)
+            text = " ".join(words[i].word for i in indices).strip()
+
+            if not text and full_text_words:
+                # Fallback: .word was empty (SDK returned typed objects without text).
+                # Reconstruct by extracting the matching slice from full_text.
+                text = " ".join(
+                    full_text_words[i] for i in indices if i < len(full_text_words)
+                ).strip()
+
             if not text:
-                # Words matched the span but all word strings are empty/whitespace.
-                # Drop this span — the segment's full text will be used as fallback.
                 continue
+
             spans.append(SpeakerSpan(
                 speaker=ann["speaker"],
                 start=ann["start"],
