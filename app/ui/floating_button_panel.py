@@ -183,10 +183,13 @@ class FloatingButtonPanel(QWidget):
     # ── recording ─────────────────────────────────────────────────────────
 
     def _on_recording_toggled(self, recording: bool) -> None:
-        if recording:
+        if not self._is_recording:
+            # First click: boot up the pipeline
             self._start_recording()
         else:
-            self._stop_recording()
+            # Pipeline is already alive. Toggle Pause instead of Stop.
+            self._mode.set_paused(not recording)
+            self._update_status_mode(recording)
 
     def _get_capture_mode(self) -> str:
         """Derive capture mode string from the current checkbox state."""
@@ -211,10 +214,12 @@ class FloatingButtonPanel(QWidget):
             self._reset_event.set()
             self._is_recording = True
             logger.info("Floating mode recording started (mode=%s, device=%s)", mode, device_index)
+            self._update_status_mode(True)
         except Exception:
             logger.exception("Failed to start floating mode")
             if self._floating_win:
                 self._floating_win.set_recording(False)
+                self._is_recording = False
 
     def _stop_recording(self) -> None:
         threading.Thread(
@@ -232,6 +237,7 @@ class FloatingButtonPanel(QWidget):
         self._is_recording = False
         if self._floating_win:
             self._floating_win.set_recording(False)
+        self._update_status(active=True) # Reset main active status
 
     # ── segment callback (asyncio thread) ────────────────────────────────
 
@@ -283,11 +289,23 @@ class FloatingButtonPanel(QWidget):
 
     def _update_status(self, active: bool) -> None:
         if active:
-            self._status_label.setText("● Botão flutuante ativo — clique nele para gravar")
-            self._status_label.setStyleSheet("color: #b8bb26; font-weight: bold;")
+            if self._is_recording:
+                pass # Handled by _update_status_mode
+            else:
+                self._status_label.setText("● Botão flutuante ativo (aguardando primeiro uso...)")
+                self._status_label.setStyleSheet("color: #b8bb26; font-weight: bold;")
         else:
             self._status_label.setText("○  Botão flutuante inativo")
             self._status_label.setStyleSheet("color: #a89984;")
+
+    def _update_status_mode(self, unpaused: bool) -> None:
+        """Update specifically when toggling pause vs recording."""
+        if unpaused:
+            self._status_label.setText("● Gravando — escutando áudio (servidor rodando)")
+            self._status_label.setStyleSheet("color: #fb4934; font-weight: bold;")
+        else:
+            self._status_label.setText("⏸ Pausado — áudio ignorado (servidor rodando em standby)")
+            self._status_label.setStyleSheet("color: #fabd2f; font-weight: bold;")
 
     def _on_source_changed(self, _checked: bool) -> None:
         """Update device selector when checkboxes change."""

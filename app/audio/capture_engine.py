@@ -49,6 +49,7 @@ class AudioCaptureEngine:
         self._is_loopback = False
         self._loopback_thread: Optional[threading.Thread] = None
         self._lock = threading.Lock()
+        self._paused = False
 
         # Frame mixer — only active in 'both' mode.
         # Each source pushes to its own sub-queue; the mixer thread pairs frames
@@ -464,9 +465,21 @@ class AudioCaptureEngine:
 
         return np.clip(frame * self._agc_gain, -1.0, 1.0).astype(np.float32)
 
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume audio frame processing.
+
+        When paused, frames are dropped silently before reaching the VAD queue,
+        effectively halting transcription without tearing down the audio streams.
+        """
+        self._paused = paused
+        logger.info("Capture paused: %s", self._paused)
+
     # ── shared queue write ───────────────────────────────────────────────
 
     def _enqueue_frame(self, frame: np.ndarray) -> None:
+        if self._paused:
+            return
+
         # Publish RMS for the UI display queue first (non-blocking, drops when full).
         try:
             rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))

@@ -124,6 +124,14 @@ class LivePanel(QWidget):
         self._btn_record.clicked.connect(self._on_record_clicked)
         btn_row.addWidget(self._btn_record)
 
+        self._btn_pause = QPushButton("⏸  Pausar")
+        self._btn_pause.setObjectName("btnPause")
+        self._btn_pause.setCheckable(True)
+        self._btn_pause.setEnabled(False)
+        self._btn_pause.setMinimumWidth(90)
+        self._btn_pause.clicked.connect(self._on_pause_clicked)
+        btn_row.addWidget(self._btn_pause)
+
         self._btn_stop = QPushButton("⏹  Parar")
         self._btn_stop.setObjectName("btnStop")
         self._btn_stop.setEnabled(False)
@@ -253,6 +261,9 @@ class LivePanel(QWidget):
             self._is_recording = True
             self._btn_record.setChecked(True)
             self._btn_stop.setEnabled(True)
+            self._btn_pause.setEnabled(True)
+            self._btn_pause.setChecked(False)
+            self._btn_pause.setText("⏸  Pausar")
             self._btn_record.setEnabled(False)
             self._chk_mic.setEnabled(False)
             self._chk_loopback.setEnabled(False)
@@ -278,6 +289,7 @@ class LivePanel(QWidget):
         self._btn_record.setChecked(False)
         self._btn_record.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._btn_pause.setEnabled(False)
         self._chk_mic.setEnabled(True)
         self._chk_loopback.setEnabled(True)
         self._device_selector.setEnabled(self._chk_mic.isChecked())
@@ -314,6 +326,7 @@ class LivePanel(QWidget):
         self._btn_record.setChecked(False)
         self._btn_record.setEnabled(True)
         self._btn_stop.setEnabled(False)
+        self._btn_pause.setEnabled(False)
         self._chk_mic.setEnabled(True)
         self._chk_loopback.setEnabled(True)
         self._device_selector.setEnabled(self._chk_mic.isChecked())
@@ -350,6 +363,8 @@ class LivePanel(QWidget):
 
     @pyqtSlot(float)
     def _on_rms_updated(self, rms: float) -> None:
+        if self._btn_pause.isChecked():
+            return
         level = min(int(rms * 500), 100)  # scale for visibility
         self._rms_bar.setValue(level)
 
@@ -440,6 +455,24 @@ class LivePanel(QWidget):
             self._buffer.export_markdown(path)
         self._status_label.setText(f"Exportado: {Path(path).name}")
         self._status_label.setStyleSheet("color: #b8bb26;")
+
+    @pyqtSlot(bool)
+    def _on_pause_clicked(self, checked: bool) -> None:
+        if not self._is_recording:
+            return
+        
+        self._mode.set_paused(checked)
+        if checked:
+            self._btn_pause.setText("▶  Retomar")
+            self._status_label.setText("Pausado (áudio ignorado)")
+            self._status_label.setStyleSheet("color: #fabd2f;")
+            self._btn_record.setText("⏸  Pausado")
+            self._rms_bar.setValue(0)
+        else:
+            self._btn_pause.setText("⏸  Pausar")
+            self._status_label.setText("Gravando (escutando)...")
+            self._status_label.setStyleSheet("color: #fb4934; font-weight: bold;")
+            self._btn_record.setText("⏺  Gravando...")
 
     def _on_clear_clicked(self) -> None:
         self._buffer.clear()

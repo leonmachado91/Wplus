@@ -38,3 +38,4 @@ dist/
 .idea/
 *.swp
 .agent/
+debug_audio_chunks/

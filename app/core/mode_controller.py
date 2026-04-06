@@ -193,6 +193,15 @@ class ModeController:
 
         logger.info("ModeController: Live Mode 2 stopped.")
 
+    def set_paused(self, paused: bool) -> None:
+        """Pause or resume live capture without stopping the stream."""
+        if self._capture:
+            self._capture.set_paused(paused)
+        if self._float_capture:
+            self._float_capture.set_paused(paused)
+
+
+
     # ── floating mode (Mode 3) ────────────────────────────────────────────
 
     def start_mode_floating(
