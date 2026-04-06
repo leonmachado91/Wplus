@@ -43,7 +43,7 @@ class TranscriptSegment:
     end_time: float = 0.0
     text: str = ""
     speaker: Optional[str] = None
-    confidence: float = 0.0
+    confidence: Optional[float] = None  # None when Groq does not return avg_logprob
     words: list[WordTimestamp] = field(default_factory=list)
     chunk_was_forced: bool = False
     is_partial: bool = False

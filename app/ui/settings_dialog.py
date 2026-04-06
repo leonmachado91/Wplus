@@ -80,7 +80,7 @@ class SettingsDialog(QDialog):
         self._add_page("Diarização", self._build_diarization_page())
         self._add_page("Servidor & Rede", self._build_server_page())
         self._add_page("Interface", self._build_interface_page())
-        self._add_page("Filtros de Rudo", self._build_filters_page())
+        self._add_page("Filtros de Ruído", self._build_filters_page())
 
         self._list_widget.setCurrentRow(0)
 
@@ -274,6 +274,15 @@ class SettingsDialog(QDialog):
         self._ui_elements["audio"]["channels"] = channels_cb
         layout.addRow("Canais:", channels_cb)
 
+        debug_save_cb = QCheckBox("Salvar chunks de áudio para Debug (.wav)")
+        debug_save_cb.setToolTip(
+            "Se ativado, cada fragmento de áudio detectado será salvo na pasta 'debug_audio_chunks'\n"
+            "na raiz do projeto. Isso é útil para ouvir o que exatamente o Whisper está recebendo.\n"
+            "Aviso: Pode encher o disco rapidamente se deixado ligado por dias."
+        )
+        self._ui_elements["audio"]["save_debug_audio"] = debug_save_cb
+        layout.addRow("Debug:", debug_save_cb)
+
         return page
 
     def _build_vad_page(self) -> QWidget:
@@ -297,7 +306,7 @@ class SettingsDialog(QDialog):
                     "Probabilidade mínima de fala para iniciar um chunk.\n"
                     "Valor mais alto → menos sensível (ignora ruídos, respirações).\n"
                     "Valor mais baixo → mais sensível (captura sons fracos).\n"
-                    "Recomendado: 0.50"
+                    "Recomendado: 0.30"
                 )
             )
         )
@@ -309,7 +318,7 @@ class SettingsDialog(QDialog):
                 tooltip=(
                     "Probabilidade abaixo da qual o silêncio começa a ser contado.\n"
                     "Deve ser ≤ Onset. Valor mais baixo → o chunk encerra mais rápido após uma pausa.\n"
-                    "Recomendado: 0.35"
+                    "Recomendado: 0.10"
                 )
             )
         )
@@ -329,7 +338,7 @@ class SettingsDialog(QDialog):
         offset_frames.setToolTip(
             "Número de frames consecutivos abaixo do limiar de fim para encerrar o chunk.\n"
             "Cada frame dura ~32ms. Valor menor → chunk encerra mais rápido após pausa; valor maior → mais tolerante a pausas naturais.\n"
-            "Recomendado: 6"
+            "Recomendado: 20"
         )
         self._ui_elements["vad"]["offset_frames"] = offset_frames
         layout.addRow("Frames de Confirmação (Fim):", offset_frames)
@@ -340,7 +349,7 @@ class SettingsDialog(QDialog):
         min_speech.setToolTip(
             "Duração mínima de um chunk de fala para ser enviado à transcrição.\n"
             "Chunks menores que este valor são descartados (evita enviar ruídos curtos).\n"
-            "Recomendado: 200ms"
+            "Recomendado: 500ms"
         )
         self._ui_elements["vad"]["min_speech_duration_ms"] = min_speech
         layout.addRow("Duração Mínima de Fala:", min_speech)
@@ -351,7 +360,7 @@ class SettingsDialog(QDialog):
         speech_pad.setToolTip(
             "Quantidade de áudio capturada ANTES do início detectado da fala (pre-roll).\n"
             "Evita cortar o início de palavras. Valor muito baixo causa palavras cortadas.\n"
-            "Recomendado: 300ms"
+            "Recomendado: 500ms"
         )
         self._ui_elements["vad"]["speech_pad_ms"] = speech_pad
         layout.addRow("Pre-roll de Áudio:", speech_pad)

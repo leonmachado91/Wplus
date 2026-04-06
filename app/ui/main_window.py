@@ -213,10 +213,13 @@ class MainWindow(QMainWindow):
         floating_index = self._tabs.indexOf(self._floating_panel)
 
         if index == floating_index:
-            self._prev_tab_index = self._tabs.currentIndex()
+            # Don't update _prev_tab_index here: currentIndex() already reflects
+            # the floating tab, so we must preserve the value set before the switch.
             self._floating_panel.activate()
             self.showMinimized()
         else:
+            # Record the current non-floating tab so we can return here later.
+            self._prev_tab_index = index
             self._floating_panel.deactivate()
 
     def on_floating_window_closed(self) -> None:

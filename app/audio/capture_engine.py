@@ -35,6 +35,13 @@ class AudioCaptureEngine:
         self.channels = channels
         self.raw_pcm_queue: queue.Queue[np.ndarray] = queue.Queue(maxsize=QUEUE_MAX)
 
+        # Dedicated lightweight queue for RMS display in the UI.
+        # The UI reads from this queue only — never from raw_pcm_queue —
+        # so the VAD pipeline is never disrupted by display polling.
+        # maxsize=50 is enough for ~2.5 seconds at 20 fps polling; older
+        # values are dropped automatically when the queue is full.
+        self.rms_queue: queue.Queue[float] = queue.Queue(maxsize=50)
+
         self._stream = None        # sd.InputStream for mic
         self._pyaudio = None       # pyaudiowpatch instance for loopback
         self._pyaudio_stream = None
@@ -49,15 +56,37 @@ class AudioCaptureEngine:
         """Start capturing audio.
 
         Args:
-            device_index: device index. None = system default.
-            mode: 'mic' for microphone, 'loopback' for system audio (WASAPI).
+            device_index: device index for the mic. None = system default.
+            mode: 'mic' | 'loopback' | 'both'.
+                  'both' starts mic AND WASAPI loopback simultaneously;
+                  frames from both sources are interleaved in raw_pcm_queue
+                  and the VAD processes them as a unified stream.
         """
         with self._lock:
             if self._running:
                 logger.warning("Capture already running, ignoring start()")
                 return
 
-            if mode == "loopback":
+            if mode == "both":
+                self._start_mic(device_index)   # sets _stream, _running=True
+                try:
+                    self._start_loopback()       # sets _pyaudio_stream + thread
+                except Exception:
+                    # Loopback failed after mic started — roll back the mic so
+                    # we don't leave the engine in a half-started state.
+                    logger.exception(
+                        "Loopback failed in 'both' mode — stopping mic and re-raising"
+                    )
+                    if self._stream:
+                        try:
+                            self._stream.stop()
+                            self._stream.close()
+                        except Exception:
+                            pass
+                        self._stream = None
+                    self._running = False
+                    raise
+            elif mode == "loopback":
                 self._start_loopback()
             else:
                 self._start_mic(device_index)
@@ -311,6 +340,14 @@ class AudioCaptureEngine:
     # ── shared queue write ───────────────────────────────────────────────
 
     def _enqueue_frame(self, frame: np.ndarray) -> None:
+        # Publish RMS for the UI display queue first (non-blocking, drops when full).
+        try:
+            rms = float(np.sqrt(np.mean(frame.astype(np.float64) ** 2)))
+            self.rms_queue.put_nowait(rms)
+        except queue.Full:
+            pass  # UI didn't read fast enough — silently drop the stale value
+
+        # Then push the raw frame to the VAD pipeline queue.
         try:
             self.raw_pcm_queue.put_nowait(frame)
         except queue.Full:

@@ -10,12 +10,12 @@ from typing import TYPE_CHECKING, Any, Optional
 
 from PyQt6.QtCore import Qt, QMetaObject, pyqtSignal, pyqtSlot
 from PyQt6.QtWidgets import (
+    QCheckBox,
     QHBoxLayout,
     QLabel,
     QListWidget,
     QListWidgetItem,
     QPushButton,
-    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -88,19 +88,21 @@ class FloatingButtonPanel(QWidget):
         info.setWordWrap(True)
         layout.addWidget(info)
 
-        # ── device row ───────────────────────────────────────────────────
+        # ── device row ────────────────────────────────────────────────
         device_row = QHBoxLayout()
-        device_label = QLabel("Dispositivo:")
+        device_label = QLabel("Fonte:")
         device_label.setObjectName("labelMuted")
         device_row.addWidget(device_label)
 
-        self._radio_mic = QRadioButton("Microfone")
-        self._radio_mic.setChecked(True)
-        self._radio_mic.toggled.connect(self._on_source_changed)
-        device_row.addWidget(self._radio_mic)
+        self._chk_mic = QCheckBox("Microfone")
+        self._chk_mic.setChecked(True)
+        self._chk_mic.toggled.connect(self._on_source_changed)
+        device_row.addWidget(self._chk_mic)
 
-        self._radio_loopback = QRadioButton("Áudio do Sistema")
-        device_row.addWidget(self._radio_loopback)
+        self._chk_loopback = QCheckBox("Áudio do Sistema")
+        self._chk_loopback.setChecked(False)
+        self._chk_loopback.toggled.connect(self._on_source_changed)
+        device_row.addWidget(self._chk_loopback)
 
         device_row.addSpacing(12)
 
@@ -186,9 +188,19 @@ class FloatingButtonPanel(QWidget):
         else:
             self._stop_recording()
 
+    def _get_capture_mode(self) -> str:
+        """Derive capture mode string from the current checkbox state."""
+        mic = self._chk_mic.isChecked()
+        loopback = self._chk_loopback.isChecked()
+        if mic and loopback:
+            return "both"
+        if loopback:
+            return "loopback"
+        return "mic"
+
     def _start_recording(self) -> None:
-        mode = "loopback" if self._radio_loopback.isChecked() else "mic"
-        device_index = self._device_selector.selected_device_index()
+        mode = self._get_capture_mode()
+        device_index = self._device_selector.selected_device_index() if self._chk_mic.isChecked() else None
         try:
             self._mode.start_mode_floating(
                 device_index=device_index,
@@ -278,8 +290,8 @@ class FloatingButtonPanel(QWidget):
             self._status_label.setStyleSheet("color: #a89984;")
 
     def _on_source_changed(self, _checked: bool) -> None:
-        if self._radio_mic.isChecked():
-            self._device_selector._mode = "mic"
-        else:
-            self._device_selector._mode = "loopback"
-        self._device_selector.refresh()
+        """Update device selector when checkboxes change."""
+        mic_on = self._chk_mic.isChecked()
+        self._device_selector.setEnabled(mic_on)
+        if mic_on:
+            self._device_selector.set_mode("mic")

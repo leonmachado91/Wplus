@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from typing import Any
 
 from app.core.settings_manager import SettingsManager
 from app.core.transcript_buffer import TranscriptBuffer

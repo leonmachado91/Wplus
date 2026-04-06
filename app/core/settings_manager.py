@@ -32,15 +32,18 @@ class AudioSettings(BaseModel):
     loopback_device_index: Optional[int] = None
     sample_rate: int = 16000
     channels: int = 1
+    save_debug_audio: bool = False
 
 
 class VADSettings(BaseModel):
     enabled: bool = True
-    onset_threshold: float = 0.5
-    offset_threshold: float = 0.35
-    min_speech_duration_ms: int = 200
+    onset_threshold: float = 0.3
+    offset_threshold: float = 0.1
+    onset_frames: int = 2
+    offset_frames: int = 20
+    min_speech_duration_ms: int = 500
     max_chunk_duration_s: int = 15
-    speech_pad_ms: int = 300
+    speech_pad_ms: int = 500
 
 
 class DiarizationSettings(BaseModel):
@@ -226,7 +229,8 @@ class SettingsManager:
         else:
             settings = AppSettings()
 
-        # env vars override settings.json
+        # env vars override settings.json — but never persist them back to disk
+        # automatically, to avoid leaking secrets from .env into the JSON file.
         import os
         env_groq = os.environ.get("GROQ_API_KEY", "")
         env_hf = os.environ.get("HUGGINGFACE_TOKEN", "")
@@ -237,7 +241,9 @@ class SettingsManager:
             settings.api.huggingface_token = env_hf
             logger.info("HuggingFace token loaded from environment")
 
-        self._write(settings)
+        # NOTE: intentionally NOT writing to disk here.
+        # Settings are persisted only via save_now() or the debounced _schedule_save(),
+        # which are triggered explicitly by user actions.
         return settings
 
     @staticmethod

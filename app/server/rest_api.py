@@ -8,6 +8,7 @@ import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from app.core.mode_controller import ModeController
 from app.core.settings_manager import SettingsManager
 from app.core.transcript_buffer import TranscriptBuffer
 
@@ -44,14 +45,7 @@ def create_app(settings: SettingsManager, buffer: TranscriptBuffer, mode_control
         body = body or {}
         mode = body.get("mode", "mic")
         device_index = body.get("device_index")
-        
-        # In a real setup, we might also toggle the UI state or rely on listeners.
-        # But for now we just call the backend. Note: buffer logic requires UI bridge
-        # so calling start_mode_live needs to inform LivePanel, or LivePanel uses it.
-        # Wait, LivePanel hooks Start/Stop themselves, so they will be out of sync
-        # if the rest API triggers them. For pure terminal or OBS plugin, it'll work nicely!
-        from app.core.mode_controller import ModeController
-        
+
         if mode_controller and isinstance(mode_controller, ModeController):
             if not buffer.session_id:
                 buffer.start_session()
@@ -61,7 +55,6 @@ def create_app(settings: SettingsManager, buffer: TranscriptBuffer, mode_control
 
     @app.post("/api/session/stop")
     def stop_session() -> dict:
-        from app.core.mode_controller import ModeController
         if mode_controller and isinstance(mode_controller, ModeController):
             mode_controller.stop_mode_live()
             return {"ok": True, "message": "Recording stopped"}
@@ -118,9 +111,8 @@ def create_app(settings: SettingsManager, buffer: TranscriptBuffer, mode_control
 
     # ── File Watcher (Mode 1) endpoints ──────────────────────────────────
 
-    # NOTE: The file_watcher instance is lazily resolved from the app state
-    # It is set externally after the panel is created.
-    _file_watcher = None
+    # NOTE: The file_watcher instance is lazily resolved from the app state.
+    # It is set externally after the panel is created via app.state.file_watcher.
 
     @app.get("/api/watcher/status")
     def watcher_status() -> dict:

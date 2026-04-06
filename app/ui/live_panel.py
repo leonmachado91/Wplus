@@ -16,7 +16,6 @@ from PyQt6.QtWidgets import (
     QLineEdit,
     QProgressBar,
     QPushButton,
-    QRadioButton,
     QVBoxLayout,
     QWidget,
 )
@@ -82,24 +81,37 @@ class LivePanel(QWidget):
         source_label.setObjectName("labelMuted")
         source_row.addWidget(source_label)
 
-        self._radio_mic = QRadioButton("Microfone")
-        self._radio_mic.setChecked(True)
-        self._radio_mic.toggled.connect(self._on_source_changed)
-        source_row.addWidget(self._radio_mic)
+        self._chk_mic = QCheckBox("Microfone")
+        self._chk_mic.setChecked(True)
+        self._chk_mic.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._chk_mic)
 
-        self._radio_loopback = QRadioButton("Áudio do Sistema")
-        source_row.addWidget(self._radio_loopback)
+        self._chk_loopback = QCheckBox("Áudio do Sistema")
+        self._chk_loopback.setChecked(False)
+        self._chk_loopback.toggled.connect(self._on_source_changed)
+        source_row.addWidget(self._chk_loopback)
 
-        source_row.addSpacing(20)
+        source_row.addSpacing(12)
 
-        device_label = QLabel("Dispositivo:")
+        device_label = QLabel("Dispositivo do mic:")
         device_label.setObjectName("labelMuted")
+        self._lbl_device = device_label
         source_row.addWidget(device_label)
 
-        self._device_selector = DeviceSelector(mode="all")
+        self._device_selector = DeviceSelector(mode="mic")
         source_row.addWidget(self._device_selector, 1)
 
         layout.addLayout(source_row)
+
+        # ── echo warning (shown only when both sources are active) ─────────────
+        self._lbl_echo_warn = QLabel(
+            "⚠ Modo Ambos ativo: use fones de ouvido para evitar duplicação — "
+            "o mic pode captar o áudio dos alto-falantes."
+        )
+        self._lbl_echo_warn.setObjectName("labelMuted")
+        self._lbl_echo_warn.setStyleSheet("color: #fabd2f; font-size: 11px;")
+        self._lbl_echo_warn.setVisible(False)
+        layout.addWidget(self._lbl_echo_warn)
 
         # ── control buttons row ──────────────────────────────────────────
         btn_row = QHBoxLayout()
@@ -197,9 +209,27 @@ class LivePanel(QWidget):
     def _on_stop_clicked(self) -> None:
         self._stop_recording()
 
+    def _get_capture_mode(self) -> str:
+        """Derive capture mode string from the current checkbox state."""
+        mic = self._chk_mic.isChecked()
+        loopback = self._chk_loopback.isChecked()
+        if mic and loopback:
+            return "both"
+        if loopback:
+            return "loopback"
+        return "mic"  # default / only-mic
+
     def _start_recording(self) -> None:
-        mode = "loopback" if self._radio_loopback.isChecked() else "mic"
-        device_index = self._device_selector.selected_device_index()
+        # Guard: at least one source must be selected
+        if not self._chk_mic.isChecked() and not self._chk_loopback.isChecked():
+            self._status_label.setText("⚠ Selecione ao menos uma fonte de áudio.")
+            self._status_label.setStyleSheet("color: #fabd2f;")
+            self._btn_record.setChecked(False)
+            return
+
+        mode = self._get_capture_mode()
+        # Device index only matters when mic is part of the capture
+        device_index = self._device_selector.selected_device_index() if self._chk_mic.isChecked() else None
 
         # start session
         self._buffer.start_session()
@@ -224,12 +254,13 @@ class LivePanel(QWidget):
             self._btn_record.setChecked(True)
             self._btn_stop.setEnabled(True)
             self._btn_record.setEnabled(False)
-            self._radio_mic.setEnabled(False)
-            self._radio_loopback.setEnabled(False)
+            self._chk_mic.setEnabled(False)
+            self._chk_loopback.setEnabled(False)
             self._device_selector.setEnabled(False)
             self._rms_timer.start(50)  # 20fps RMS polling
 
-            self._status_label.setText("Gravando...")
+            mode_label = {"mic": "Mic", "loopback": "Sistema", "both": "Mic + Sistema"}.get(mode, mode)
+            self._status_label.setText(f"Gravando ({mode_label})...")
             self._status_label.setStyleSheet("color: #fb4934; font-weight: bold;")
             logger.info("Recording started (mode=%s, device=%s)", mode, device_index)
 
@@ -238,6 +269,18 @@ class LivePanel(QWidget):
             self._status_label.setText(f"Erro: {e}")
             self._status_label.setStyleSheet("color: #fb4934;")
             self._cleanup_pipeline()
+
+    def _cleanup_pipeline(self) -> None:
+        """Reset UI state after a failed or interrupted start."""
+        self._rms_timer.stop()
+        self._rms_bar.setValue(0)
+        self._is_recording = False
+        self._btn_record.setChecked(False)
+        self._btn_record.setEnabled(True)
+        self._btn_stop.setEnabled(False)
+        self._chk_mic.setEnabled(True)
+        self._chk_loopback.setEnabled(True)
+        self._device_selector.setEnabled(self._chk_mic.isChecked())
 
     def _stop_recording(self) -> None:
         if not self._is_recording:
@@ -271,9 +314,9 @@ class LivePanel(QWidget):
         self._btn_record.setChecked(False)
         self._btn_record.setEnabled(True)
         self._btn_stop.setEnabled(False)
-        self._radio_mic.setEnabled(True)
-        self._radio_loopback.setEnabled(True)
-        self._device_selector.setEnabled(True)
+        self._chk_mic.setEnabled(True)
+        self._chk_loopback.setEnabled(True)
+        self._device_selector.setEnabled(self._chk_mic.isChecked())
 
         count = info.get("segment_count", 0)
         dur = info.get("duration_s", 0.0)
@@ -337,32 +380,25 @@ class LivePanel(QWidget):
     # ── RMS polling ──────────────────────────────────────────────────────
 
     def _poll_rms(self) -> None:
+        """Read the latest RMS value from the capture engine's dedicated display queue.
+
+        AudioCaptureEngine publishes float RMS values to rms_queue without blocking
+        the VAD pipeline. We take all pending values and use the last one for display,
+        keeping the main audio queue completely untouched.
+        """
         if not self._is_recording or not self._mode.capture_engine or not self._mode.capture_engine.is_running:
             return
         try:
-            import numpy as np
-            from app.audio.audio_utils import get_rms
-
-            # Drain up to 8 frames from the queue to compute RMS, then put them back.
-            q = self._mode.capture_engine.raw_pcm_queue
-            frames: list = []
-            for _ in range(8):
+            rms_q = self._mode.capture_engine.rms_queue
+            latest_rms = None
+            while True:
                 try:
-                    frames.append(q.get_nowait())
+                    latest_rms = rms_q.get_nowait()
                 except Exception:
                     break
-            for f in frames:
-                try:
-                    q.put_nowait(f)
-                except Exception:
-                    pass
 
-            if frames:
-                combined = np.concatenate(frames)
-                rms = get_rms(combined)
-                self.rms_updated.emit(rms)
-            else:
-                self.rms_updated.emit(0.0)
+            if latest_rms is not None:
+                self.rms_updated.emit(latest_rms)
 
             if self._mode.vad_processor:
                 self.vad_state_changed.emit(self._mode.vad_processor.is_speech)
@@ -372,11 +408,22 @@ class LivePanel(QWidget):
     # ── button handlers ──────────────────────────────────────────────────
 
     def _on_source_changed(self, _checked: bool) -> None:
-        if self._radio_mic.isChecked():
-            self._device_selector._mode = "mic"
-        else:
-            self._device_selector._mode = "loopback"
-        self._device_selector.refresh()
+        """Update device selector visibility/mode when checkboxes change."""
+        mic_on = self._chk_mic.isChecked()
+        loopback_on = self._chk_loopback.isChecked()
+
+        # Device selector is only relevant when mic is part of the capture.
+        self._device_selector.setEnabled(mic_on)
+        self._lbl_device.setEnabled(mic_on)
+        if mic_on:
+            self._device_selector.set_mode("mic")
+
+        # Show echo warning only when both sources are active simultaneously.
+        self._lbl_echo_warn.setVisible(mic_on and loopback_on)
+
+        # Disable Record button if nothing is selected
+        nothing_selected = not mic_on and not loopback_on
+        self._btn_record.setEnabled(not nothing_selected and not self._is_recording)
 
     def _on_export_clicked(self) -> None:
         path, _ = QFileDialog.getSaveFileName(

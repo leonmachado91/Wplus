@@ -63,6 +63,15 @@ class DeviceSelector(QWidget):
             self._combo.addItem(label, d.index)
         self._combo.blockSignals(False)
 
+    def set_mode(self, mode: str) -> None:
+        """Set the device filter mode and refresh the list.
+
+        Args:
+            mode: One of 'all', 'mic', or 'loopback'.
+        """
+        self._mode = mode
+        self.refresh()
+
     def selected_device_index(self) -> Optional[int]:
         return self._combo.currentData()
 

@@ -24,11 +24,16 @@ class TranscriptBuffer:
         self._lock = threading.Lock()
         self._segments: list[TranscriptSegment] = []
         self._listeners: list[Listener] = []
-        self.session_id: Optional[str] = None
+        self._session_id: Optional[str] = None
         self._pending_speakers: dict[str, str] = {}  # segment_id -> speaker_name
 
         # auto-save
         self._auto_save_path: Optional[Path] = None
+
+    @property
+    def session_id(self) -> Optional[str]:
+        """Read-only access to the current session ID."""
+        return self._session_id
 
     # ── listener management ──────────────────────────────────────────────
 
@@ -49,16 +54,17 @@ class TranscriptBuffer:
 
     def start_session(self) -> str:
         with self._lock:
-            self.session_id = uuid4().hex
+            self._session_id = uuid4().hex
             self._segments.clear()
             self._pending_speakers.clear()
-        self._notify("session_started", {"session_id": self.session_id})
-        return self.session_id
+            session_id = self._session_id
+        self._notify("session_started", {"session_id": session_id})
+        return session_id
 
     def stop_session(self) -> dict:
         with self._lock:
             info = {
-                "session_id": self.session_id,
+                "session_id": self._session_id,
                 "segment_count": len(self._segments),
                 "duration_s": self._segments[-1].end_time if self._segments else 0.0,
             }
@@ -98,10 +104,14 @@ class TranscriptBuffer:
                 return None
             for k, v in updates.items():
                 setattr(seg, k, v)
+            # Capture the dict and session_id inside the lock to prevent
+            # a concurrent diarization write from producing an inconsistent snapshot.
+            seg_dict = seg.to_dict()
+            session_id = self._session_id
 
         self._notify("segment_updated", {
-            "session_id": self.session_id,
-            "segment": seg.to_dict(),
+            "session_id": session_id,
+            "segment": seg_dict,
         })
 
         # Auto-save: rewrite file when diarization updates arrive so the saved
@@ -201,7 +211,7 @@ class TranscriptBuffer:
         """Write all segments to a Markdown file, respecting sub_segments."""
         p = Path(path)
         p.parent.mkdir(parents=True, exist_ok=True)
-        lines: list[str] = [f"# Transcription — Session {self.session_id or 'unknown'}\n"]
+        lines: list[str] = [f"# Transcription — Session {self._session_id or 'unknown'}\n"]
         for seg in self.get_segments():
             lines.extend(self._segment_to_lines(seg))
         p.write_text("\n".join(lines), encoding="utf-8")
@@ -219,7 +229,8 @@ class TranscriptBuffer:
             return
         with self._lock:
             segs = list(self._segments)
-        header = f"# Transcription — Session {self.session_id or 'unknown'}\n\n"
+            session_id = self._session_id
+        header = f"# Transcription — Session {session_id or 'unknown'}\n\n"
         body_lines: list[str] = []
         for seg in segs:
             body_lines.extend(self._segment_to_lines(seg))
@@ -249,5 +260,5 @@ class TranscriptBuffer:
             self._auto_save_path.parent.mkdir(parents=True, exist_ok=True)
             # write header
             with open(self._auto_save_path, "w", encoding="utf-8") as f:
-                f.write(f"# Transcription — Session {self.session_id or 'unknown'}\n\n")
+                f.write(f"# Transcription — Session {self._session_id or 'unknown'}\n\n")
             logger.info("Auto-save enabled: %s", self._auto_save_path)

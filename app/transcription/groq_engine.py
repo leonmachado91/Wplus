@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import io
 import logging
+import math
 import time
 import threading
 from collections import deque
+from pathlib import Path
 from typing import TYPE_CHECKING, Callable, Optional
 
 from groq import AsyncGroq, RateLimitError, APIStatusError
@@ -20,18 +22,34 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+# Absolute path to the debug output folder — resolved once at import time so
+# that it works regardless of the process working directory.
+_DEBUG_AUDIO_DIR = Path(__file__).resolve().parent.parent.parent / "debug_audio_chunks"
+
 
 class RateLimiter:
-    """Simple token-bucket rate limiter for Groq free tier."""
+    """Simple token-bucket rate limiter for Groq free tier.
+
+    NOTE: _lock is created lazily inside the asyncio loop (via _ensure_lock())
+    to guarantee it is bound to the correct event loop. Creating asyncio
+    primitives before a loop is running causes a DeprecationWarning in
+    Python 3.10+ and an error in future versions.
+    """
 
     def __init__(self, max_requests: int = 20, window_seconds: float = 60.0) -> None:
         self._max = max_requests
         self._window = window_seconds
         self._timestamps: list[float] = []
-        self._lock = asyncio.Lock()
+        self._lock: Optional[asyncio.Lock] = None  # created lazily inside the loop
+
+    def _ensure_lock(self) -> asyncio.Lock:
+        """Return (and create if needed) the asyncio.Lock bound to the running loop."""
+        if self._lock is None:
+            self._lock = asyncio.Lock()
+        return self._lock
 
     async def acquire(self) -> None:
-        async with self._lock:
+        async with self._ensure_lock():
             now = time.monotonic()
             # purge old timestamps
             self._timestamps = [t for t in self._timestamps if now - t < self._window]
@@ -180,6 +198,17 @@ class TranscriptionEngine:
         # Rolling context: combina o prompt estático com o contexto dinâmico do último segmento.
         # O Whisper usa apenas os últimos ~224 tokens do prompt — truncamos para ≈1200 chars (~220 tok)
         # para garantir que a parte mais recente da conversa sempre caiba.
+        
+        if self._settings.get("audio", "save_debug_audio"):
+            try:
+                _DEBUG_AUDIO_DIR.mkdir(exist_ok=True)
+                timestamp_str = time.strftime("%Y%m%d_%H%M%S")
+                chunk_id = meta.get("chunk_id", f"{int(time.time() * 1000)}")
+                filename = _DEBUG_AUDIO_DIR / f"chunk_{timestamp_str}_{chunk_id}.wav"
+                filename.write_bytes(wav_bytes)
+                logger.debug("Debug audio saved to %s", filename)
+            except Exception as e:
+                logger.error("Failed to save debug audio: %s", e)
         
         use_rolling = self._settings.get("api", "use_rolling_context")
 
@@ -378,7 +407,6 @@ class TranscriptionEngine:
             if valid_logprobs:
                 avg_logprob = sum(valid_logprobs) / len(valid_logprobs)
 
-        import math
         if avg_logprob is not None:
             confidence: "float | None" = min(max(math.exp(avg_logprob), 0.0), 1.0)
         else:

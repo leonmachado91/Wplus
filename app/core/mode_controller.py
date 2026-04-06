@@ -21,6 +21,11 @@ class ModeController:
         self._settings = settings
         self._buffer = buffer
 
+        # Lock that guards _is_live_running and _is_floating_running.
+        # Prevents concurrent start/stop calls (e.g. from REST API + UI) from
+        # launching two pipelines simultaneously or creating a torn-down state.
+        self._pipeline_lock = threading.Lock()
+
         # Pipeline components
         self._capture: Optional[AudioCaptureEngine] = None
         self._vad: Optional[VADProcessor] = None
@@ -81,11 +86,12 @@ class ModeController:
     # ── live mode ────────────────────────────────────────────────────────
 
     def start_mode_live(self, device_index: Optional[int], mode: str) -> None:
-        if self._is_live_running:
-            logger.warning("Live mode is already running.")
-            return
+        with self._pipeline_lock:
+            if self._is_live_running:
+                logger.warning("Live mode is already running.")
+                return
+            self._is_live_running = True
 
-        self._is_live_running = True
         self._stop_event.clear()
 
         # Fresh queues for the session
@@ -141,17 +147,22 @@ class ModeController:
         )
 
     def stop_mode_live(self) -> None:
-        if not self._is_live_running:
-            return
+        with self._pipeline_lock:
+            if not self._is_live_running:
+                return
+            # Mark as stopped early (inside lock) to prevent concurrent start attempts.
+            self._is_live_running = False
 
         self._stop_event.set()
 
         if self._capture:
             self._capture.stop()
-        if self._chunk_asm:
-            self._chunk_asm.stop()
+        # B5: Stop VAD before ChunkAssembler so the VAD's final flush is still
+        # consumed by the assembler before it exits its own loop.
         if self._vad:
             self._vad.stop()
+        if self._chunk_asm:
+            self._chunk_asm.stop()
         if self._engine:
             self._engine.stop()
         if self._diarization_engine:
@@ -164,7 +175,6 @@ class ModeController:
             self._bridge_thread.join(timeout=2)
             self._bridge_thread = None
 
-        self._is_live_running = False
         logger.info("ModeController: Live Mode 2 stopped.")
 
     # ── floating mode (Mode 3) ────────────────────────────────────────────
@@ -181,11 +191,12 @@ class ModeController:
         chain as Mode 2, but delivers segments via *on_segment* callback instead of
         TranscriptBuffer. Diarization is never started in this mode.
         """
-        if self._is_floating_running:
-            logger.warning("Floating mode is already running.")
-            return
+        with self._pipeline_lock:
+            if self._is_floating_running:
+                logger.warning("Floating mode is already running.")
+                return
+            self._is_floating_running = True
 
-        self._is_floating_running = True
         self._float_stop_event.clear()
 
         self._float_speech_queue = queue.Queue()
@@ -239,17 +250,20 @@ class ModeController:
         )
 
     def stop_mode_floating(self) -> None:
-        if not self._is_floating_running:
-            return
+        with self._pipeline_lock:
+            if not self._is_floating_running:
+                return
+            self._is_floating_running = False
 
         self._float_stop_event.set()
 
         if self._float_capture:
             self._float_capture.stop()
-        if self._float_chunk_asm:
-            self._float_chunk_asm.stop()
+        # B5: VAD before ChunkAssembler (same rationale as stop_mode_live)
         if self._float_vad:
             self._float_vad.stop()
+        if self._float_chunk_asm:
+            self._float_chunk_asm.stop()
         if self._float_engine:
             self._float_engine.stop()
 
@@ -257,7 +271,6 @@ class ModeController:
             self._float_bridge_thread.join(timeout=2)
             self._float_bridge_thread = None
 
-        self._is_floating_running = False
         logger.info("ModeController: Floating Mode 3 stopped.")
 
     @property
@@ -272,8 +285,6 @@ class ModeController:
 
     def _start_diarization_if_enabled(self) -> None:
         """Lazily start diarization engine if configured and enabled."""
-        from app.core.settings_manager import SettingsManager  # already imported
-
         enabled = self._settings.get("diarization", "enabled")
         if not enabled:
             return
