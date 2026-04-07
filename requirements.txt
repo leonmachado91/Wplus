@@ -18,6 +18,14 @@ scipy>=1.13
 
 # ── VAD ──────────────────────────────────────────────────────────────────────
 # torch is loaded via requirements below; silero-vad fetched via torch.hub at runtime
+#
+# IMPORTANT — GPU (CUDA) support:
+#   The generic PyPI build of torch is CPU-only. To enable CUDA for an RTX GPU,
+#   install manually using the PyTorch CUDA index URL (CUDA 12.6 for RTX 2000/3000/4000):
+#
+#     pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu126
+#
+#   Verify with: python -c "import torch; print(torch.cuda.is_available())"
 torch>=2.1
 torchaudio>=2.1
 

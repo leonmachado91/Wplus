@@ -23,6 +23,27 @@ os.environ["HF_HOME"] = str(_models_dir / "huggingface")
 os.environ["TORCH_HOME"] = str(_models_dir / "torch")
 
 
+def _log_gpu_status() -> None:
+    """Log whether CUDA (GPU) is available for local model inference."""
+    try:
+        import torch
+        if torch.cuda.is_available():
+            name = torch.cuda.get_device_name(0)
+            cuda_ver = torch.version.cuda
+            logger.info("GPU disponível: %s (CUDA %s) — diarização rodará na GPU", name, cuda_ver)
+        else:
+            logger.warning(
+                "CUDA não disponível — modelos locais rodando na CPU. "
+                "Reinstale o PyTorch com suporte CUDA: "
+                "pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu121"
+            )
+    except Exception as exc:
+        logger.warning("Não foi possível verificar status da GPU: %s", exc)
+
+
+_log_gpu_status()
+
+
 def _graceful_exit(sig, frame) -> None:  # noqa: ANN001
     """SIGINT handler that exits before Intel MKL's Fortran runtime fires.
 
