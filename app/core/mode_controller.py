@@ -419,6 +419,18 @@ class ModeController:
                     resolved[0]["end"],
                 )
                 if sub_segs:
+                    # Se todos os spans tiverem o mesmo speaker, consolida em 1
+                    # (evita que o scoring de boundary descarte a última palavra)
+                    distinct_speakers = {s.speaker for s in sub_segs}
+                    if len(distinct_speakers) == 1:
+                        merged_text = " ".join(s.text for s in sub_segs).strip()
+                        sub_segs = [SpeakerSpan(
+                            speaker=sub_segs[0].speaker,
+                            start=sub_segs[0].start,
+                            end=sub_segs[-1].end,
+                            text=merged_text,
+                        )]
+
                     updates["sub_segments"] = sub_segs
                     logger.info(
                         "Sub-chunk diarization: %s → %d speaker span(s)",
@@ -478,6 +490,17 @@ class ModeController:
 
         sub_segs = self._assign_words_to_speakers(seg.words, annotations, full_text=seg.text)
         if sub_segs:
+            # Se todos os spans tiverem o mesmo speaker, consolida em 1
+            distinct_speakers = {s.speaker for s in sub_segs}
+            if len(distinct_speakers) == 1:
+                merged_text = " ".join(s.text for s in sub_segs).strip()
+                sub_segs = [SpeakerSpan(
+                    speaker=sub_segs[0].speaker,
+                    start=sub_segs[0].start,
+                    end=sub_segs[-1].end,
+                    text=merged_text,
+                )]
+
             self._buffer.update_segment(seg_id, sub_segments=sub_segs)
             logger.info(
                 "Diarization retry applied: %s → %d speaker span(s)",
@@ -511,48 +534,45 @@ class ModeController:
         """
         spans: list[SpeakerSpan] = []
         full_text_words = full_text.split() if full_text else []
+        prev_cut_idx = 0  # rastreia onde o span anterior terminou (por índice)
 
         for j, ann in enumerate(annotations):
-            ann_start = ann["start"]
             ann_end = ann["end"]
 
-            # If it's the last annotation, it takes everything until the end
             if j == len(annotations) - 1:
-                indices = [i for i, w in enumerate(words) if (w.start + w.end) / 2.0 >= ann_start]
+                # Último span: pega TODAS as palavras restantes (nenhuma fica de fora)
+                indices = list(range(prev_cut_idx, len(words)))
             else:
-                # Find the 'smartest' index to make the cut for this boundary
-                best_cut_idx = len(words)
+                # Encontra o índice de corte mais inteligente para este boundary
+                best_cut_idx = len(words)  # fallback: tudo vai pro próximo span
                 best_score = float("inf")
-                
-                for i in range(len(words)):
+
+                for i in range(prev_cut_idx, len(words)):
                     w = words[i]
                     w_mid = (w.start + w.end) / 2.0
-                    
-                    # Only consider cuts that are reasonably close (within 1.5s) to the mathematical boundary
+
+                    # Considera apenas cortes próximos ao boundary temporal (±1.5s)
                     time_diff = abs(w_mid - ann_end)
                     if time_diff > 1.5:
                         continue
-                        
-                    # Calculate punctuation bonus if we cut BEFORE word i
-                    # This means the previous word (i-1) ended the previous speaker's turn
+
+                    # Bônus se a palavra ANTERIOR termina com pontuação forte
                     bonus = 0.0
                     if i > 0:
-                        prev_word = words[i-1].word.strip()
+                        prev_word = words[i - 1].word.strip()
                         if prev_word.endswith(('.', '!', '?')):
-                            bonus = 1.0  # Huge bonus for strong punctuation
+                            bonus = 1.0
                         elif prev_word.endswith((',', ';', ':')):
-                            bonus = 0.4  # Moderate bonus for pauses
-                            
+                            bonus = 0.4
+
                     score = time_diff - bonus
                     if score < best_score:
                         best_score = score
                         best_cut_idx = i
 
-                # Gather words for this speaker
-                indices = [
-                    i for i, w in enumerate(words)
-                    if (w.start + w.end) / 2.0 >= ann_start and i < best_cut_idx
-                ]
+                # Palavras deste span: do índice anterior até best_cut_idx (exclusivo)
+                indices = list(range(prev_cut_idx, best_cut_idx))
+                prev_cut_idx = best_cut_idx  # próximo span começa daqui
 
             # Try word-level text from WordTimestamp.word (populated by groq_engine)
             text = " ".join(words[i].word for i in indices).strip()
