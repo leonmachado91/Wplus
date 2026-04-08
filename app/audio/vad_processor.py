@@ -256,3 +256,38 @@ class VADProcessor:
         self._pre_roll.clear()
         if self._model is not None:
             self._model.reset_states()
+
+    # ── quick evaluation ─────────────────────────────────────────────────
+
+    @classmethod
+    def evaluate_track(cls, audio_np: np.ndarray, sample_rate: int = 16000) -> float:
+        """Avalia rapidamente a probabilidade de voz num chunk separado longo.
+        
+        Útil como 'VAD Secundário' para tracks que saíram do Conv-TasNet.
+        Em vez de rodar frame a frame (32ms), tira a média global ou max-pool 
+        de probabilidade se o sinal tem voz real ou é ruído residual fantasma.
+        """
+        if cls._model_cache is None:
+            logger.warning("VAD não inicializado para evaluate_track.")
+            return 0.0
+
+        import torch
+        
+        # Silero VAD processa bem frames de 512 samples. 
+        # Vamos tirar a media de de probabilidade na track inteira.
+        tensor = torch.from_numpy(audio_np).float()
+        
+        frame_size = 512
+        probs = []
+        with torch.no_grad():
+            for i in range(0, len(tensor), frame_size):
+                chunk = tensor[i: i + frame_size]
+                if len(chunk) < frame_size:
+                    break
+                prob = cls._model_cache(chunk, sample_rate).item()
+                probs.append(prob)
+
+        if not probs:
+            return 0.0
+            
+        return sum(probs) / len(probs)

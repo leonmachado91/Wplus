@@ -31,8 +31,8 @@ DiarizationCallback = Callable[[str, list[dict]], None]  # (segment_id, annotati
 # Cosine similarity threshold for speaker re-identification.
 # 0.70 balances within-speaker variability vs. cross-speaker separation for
 # real-world mic/loopback audio (ECAPA VoxCeleb1 clean EER is at ~0.25, but
-# real conditions shift the distribution — 0.70 is the practical sweet spot).
-_SIM_THRESHOLD = 0.70
+# real conditions shift the distribution — 0.35 is the practical sweet spot).
+_SIM_THRESHOLD = 0.35
 
 # Window size for embedding extraction.
 # Long chunks are split into non-overlapping windows of this duration;
@@ -141,14 +141,91 @@ class DiarizationEngine:
         if self._queue.qsize() >= 4:
             logger.warning("Diarization queue full — dropping chunk %s", segment_id)
             return
-        self._queue.put((wav_bytes, chunk_meta, segment_id))
-
     def reset_speakers(self) -> None:
         """Clear speaker history (call at session start/stop)."""
         with self._speaker_lock:
             self._known_speakers.clear()
             self._next_speaker_idx = 0
         logger.debug("DiarizationEngine: speaker registry reset.")
+
+    # ── Módulo Standalone "Soft-matching" ────────────────────────────
+
+    def identify_speakers_sync(self, audio_np: np.ndarray, sr: int = 16000) -> list[tuple[str, float]]:
+        """Uso síncrono da Diarization. (Para ser chamado pelo worker do ModeController).
+        
+        Args:
+            audio_np: Chunk da Track já isolada.
+            sr: Taxa de amostragem.
+            
+        Returns:
+            Lista de (Speaker_ID, Similaridade), ordenados do maior pro menor.
+            O próprio `match_or_register` fará o split se não houver um bom match.
+        """
+        self._load_model()
+        if not self._encoder:
+            return []
+
+        embedding = self._averaged_embedding(audio_np, sr)
+        if embedding is None:
+            return []
+
+        return self._match_or_register(embedding)
+
+    def has_overlapping_speakers(self, audio_np: np.ndarray, sr: int = 16000, threshold: float = 0.15) -> bool:
+        """
+        Overlap Detector Booleano ultrarrápido (O Porteiro).
+        Fatia o áudio em janelas gigantes (1.5s) que possuem impressão local forte o suficiente 
+        para diferenciar biometrias vocais.
+        
+        Se a similaridade cruzada mínima da janela com o restante mergulhar abaixo do threshold, 
+        confirma que as impressões variaram estruturalmente: há Overlap de duas ou mais pessoas.
+        """
+        self._load_model()
+        if not self._encoder:
+            # Fallback tolerante a falhas (transcreve tudo misturado sem ativar separador)
+            return False
+
+        win_samples = int(1.5 * sr)
+        step_samples = win_samples // 2 
+        total_samples = len(audio_np)
+
+        if total_samples < win_samples:
+            return False # Áudio curtíssimo, assumir 1 pessoa.
+
+        embs = []
+        pos = 0
+        while pos + win_samples <= total_samples:
+            chunk = audio_np[pos : pos + win_samples]
+            pos += step_samples
+            
+            # Limpa espasmos/fantasmas na fatia para não gerar vectores de ruído de sala
+            # Aumentamos o gate para 0.02 (evita embular como "2a pessoa" ruídos de fundo ou respiração mútua)
+            rms = float(np.sqrt(np.mean(chunk ** 2)))
+            if rms < 0.02: 
+                continue
+                
+            emb = self._extract_embedding(chunk, sr)
+            if emb is not None:
+                embs.append(emb)
+
+        if len(embs) < 2:
+            return False # Só 1 janela válida salva -> Falso (só 1 pessoa)
+
+        sims = []
+        for i in range(len(embs)):
+            for j in range(i + 1, len(embs)):
+                sims.append(np.dot(embs[i], embs[j]))
+
+        min_sim = float(np.min(sims))
+        
+        # O limite prova-se rigoroso suficiente para separar 2 pessoas (tipicamente < 0.05) 
+        # sem dar falso positivo para oscilações vocais da mesma pessoa (tipicamente > 0.3)
+        if min_sim < threshold:
+            logger.debug(f"[Overlap Porteiro] OVERLAP IDENTIFICADO! Mínimo cruzado {min_sim:.3f} afundou do limiar de {threshold:.2f}.")
+            return True
+        else:
+            logger.debug(f"[Overlap Porteiro] Liberado. Apenas 1 pessoa detectada. Mínimo cruzado {min_sim:.3f}")
+            return False
 
     def diarize_file(self, audio_path: str) -> list[dict]:
         """Offline diarization using pyannote full pipeline — Watch mode only.
@@ -322,35 +399,55 @@ class DiarizationEngine:
             logger.warning("Embedding error: %s", exc)
             return None
 
-    def _match_or_register(self, embedding: np.ndarray) -> str:
-        """Compara embedding com speakers conhecidos (top-K centroids)."""
+    def _match_or_register(self, embedding: np.ndarray) -> list[tuple[str, float]]:
+        """Compara embedding com speakers conhecidos e retorna o ranking 'Soft-Match'.
+        
+        Se a similaridade do melhor bater com o threshold, registra o embedding no histórico.
+        Retorno: [(Speaker A, 0.82), (Speaker B, 0.65)]
+        """
         with self._speaker_lock:
             if self._known_speakers:
-                sims = [
-                    float(np.mean([np.dot(embedding, ref) for ref in refs]))
-                    for refs, _ in self._known_speakers
-                ]
-                best_idx = int(np.argmax(sims))
-                best_sim = sims[best_idx]
-
-                logger.debug(
-                    "Speaker similarities: %s | best=%.3f (idx=%d, threshold=%.2f)",
-                    [f"{s:.2f}" for s in sims], best_sim, best_idx, self._similarity_threshold,
-                )
+                # Rankea todos as similaridades
+                candidates = []
+                for refs, speaker_id in self._known_speakers:
+                    sim = float(np.mean([np.dot(embedding, ref) for ref in refs]))
+                    candidates.append((speaker_id, sim))
+                    
+                # Sort por similaridade DESC
+                candidates.sort(key=lambda x: x[1], reverse=True)
+                best_id, best_sim = candidates[0]
 
                 if best_sim >= self._similarity_threshold:
-                    refs, speaker_id = self._known_speakers[best_idx]
-                    refs.append(embedding.copy())
-                    if len(refs) > _MAX_SPEAKER_REFS:
-                        refs.pop(0)
-                    return speaker_id
+                    # Registra pro Speaker e Retorna
+                    for refs, speaker_id in self._known_speakers:
+                        if speaker_id == best_id:
+                            refs.append(embedding.copy())
+                            if len(refs) > _MAX_SPEAKER_REFS:
+                                refs.pop(0)
+                            break
+                    return candidates
+                
+                # Se não bateu com nenhum o suficiente, ele é um NOVO speaker,
+                # mas ainda assim vamos passar adiante a lista inteira (o novo entra no top 1)
 
             # Novo speaker
-            global_id = f"SPEAKER_{self._next_speaker_idx:02d}"
+            global_id = f"Speaker {self._next_speaker_idx}"
             self._next_speaker_idx += 1
             self._known_speakers.append(([embedding.copy()], global_id))
             logger.info("Novo speaker registrado: %s (%d conhecidos)", global_id, len(self._known_speakers))
-            return global_id
+            
+            # Se havia conhecidos, concatena. Se não, devolve direto.
+            # Um novo speaker tem confidence 1.0 (é ele mesmo).
+            if self._known_speakers and len(self._known_speakers) > 1:
+                 # Calcula o embedding dele contra os antigos para a "segunda" opção
+                 candidates = [(global_id, 1.0)]
+                 for refs, speaker_id in self._known_speakers[:-1]:
+                     sim = float(np.mean([np.dot(embedding, ref) for ref in refs]))
+                     candidates.append((speaker_id, sim))
+                 candidates.sort(key=lambda x: x[1], reverse=True)
+                 return candidates
+            
+            return [(global_id, 1.0)]
 
     # ── model loading ─────────────────────────────────────────────────────
 

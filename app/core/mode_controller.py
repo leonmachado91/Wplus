@@ -8,8 +8,11 @@ from app.core.transcript_buffer import TranscriptBuffer
 from app.audio.capture_engine import AudioCaptureEngine
 from app.audio.vad_processor import VADProcessor
 from app.audio.chunk_assembler import ChunkAssembler
+from app.audio.audio_utils import pcm_to_wav_bytes
 from app.transcription.groq_engine import TranscriptionEngine
 from app.transcription.segment import SpeakerSpan
+from uuid import uuid4
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
@@ -121,12 +124,21 @@ class ModeController:
             max_chunk_duration_s=vad_cfg["max_chunk_duration_s"],
             speech_pad_ms=vad_cfg["speech_pad_ms"],
         )
-        self._chunk_asm = ChunkAssembler(
-            speech_queue=self._speech_queue,
-            transcription_queue=self._transcription_queue,
-            sample_rate=sample_rate,
-        )
+        # We no longer use ChunkAssembler for Live Mode. The bridge_worker processes the PCM directly 
+        # using the new Source Separation Pipeline.
+        self._chunk_asm = None
         self._engine = TranscriptionEngine(self._settings, self._buffer, sample_rate=sample_rate)
+
+        # Load SeparatorEngine
+        from app.diarization.separator_engine import SeparatorEngine
+        sep_model_choice = self._settings.get("diarization", "separator_model") or "Conv-TasNet (Fast)"
+        self._separator_engine = SeparatorEngine(
+            use_gpu=True, 
+            max_sources=2,
+            model_type=sep_model_choice
+        )
+        if self._settings.get("diarization", "enable_source_separation"):
+             threading.Thread(target=self._separator_engine.load_model, daemon=True).start()
 
         # P2: Reseta contexto dinâmico — evita que sessão anterior influencie esta
         self._engine.reset_context()
@@ -134,7 +146,6 @@ class ModeController:
         # Start pipeline
         self._engine.start()
         self._vad.start()
-        self._chunk_asm.start()
         use_aec = self._settings.get("audio", "use_windows_aec")
         mic_normalize = self._settings.get("audio", "mic_normalize")
         self._capture.start(device_index=device_index, mode=mode, use_windows_aec=use_aec,
@@ -329,7 +340,7 @@ class ModeController:
             
             sim_threshold = self._settings.get("diarization", "similarity_threshold")
             if sim_threshold is None:
-                sim_threshold = 0.65
+                sim_threshold = 0.35
 
             self._diarization_engine = DiarizationEngine(
                 hf_token=hf_token,
@@ -598,22 +609,82 @@ class ModeController:
     # ── bridge ───────────────────────────────────────────────────────────
 
     def _bridge_worker(self) -> None:
+        """Consumes PCM directly from VAD, applies Source Separation, identifies speakers,
+        and submits all valid tracks concurrently to TranscriptionEngine.
+        """
+        sample_rate = self._settings.get("audio", "sample_rate")
+        
         while not self._stop_event.is_set():
             try:
-                wav_bytes, meta = self._transcription_queue.get(timeout=0.1)
-                if self._engine:
-                    self._engine.submit(wav_bytes, meta)
+                audio_np, meta = self._speech_queue.get(timeout=0.1)
+                
+                # Check minimum duration from VAD
+                duration_ms = meta.get("duration_ms", (len(audio_np) / sample_rate) * 1000)
+                if duration_ms < 300:
+                    continue
+                    
+                # 1. Source Separation Boolean Gate
+                overlap_detected = False
+                if getattr(self, "_diarization_engine", None) and getattr(self, "_separator_engine", None) and self._settings.get("diarization", "enable_source_separation"):
+                    # SettingsManager accepts exactly 2 arguments for key lookup
+                    overlap_thresh_val = self._settings.get("diarization", "overlap_threshold")
+                    if overlap_thresh_val is None:
+                        overlap_thresh_val = 0.15
+                    overlap_detected = self._diarization_engine.has_overlapping_speakers(audio_np, sample_rate, threshold=float(overlap_thresh_val))
+                    
+                if overlap_detected and getattr(self, "_separator_engine", None) and self._separator_engine.is_ready:
+                    tracks = self._separator_engine.separate(audio_np, sample_rate)
+                else:
+                    tracks = [audio_np]
 
-                # Send a copy to diarization in parallel
-                if self._diarization_engine and self._diarization_engine.is_running:
-                    seg_id = meta.get("segment_id", "")
-                    self._diarization_engine.submit(wav_bytes, meta, segment_id=seg_id)
+                valid_tracks = []
+                # Filtro acústico relacional: Tracks que possuem menos de 20%
+                # da energia da trilha principal são "Sombras/Bleeds" do isolamento
+                # proativo do Conv-TasNet e devem ser descartadas sumariamente como lixo, 
+                # impedindo o VAD e o Whisper de tentarem achar chifre em cabeça de cavalo.
+                rms_list = [float(np.sqrt(np.mean(t ** 2))) for t in tracks]
+                max_rms = max(rms_list) if rms_list else 0.0
 
-                self._transcription_queue.task_done()
+                for track_audio, rms in zip(tracks, rms_list):
+                    # 2. Track Validation (RMS & Secondary VAD)
+                    if rms < max(0.005, max_rms * 0.20): 
+                        continue
+                        
+                    vad_prob = VADProcessor.evaluate_track(track_audio, sample_rate)
+                    if vad_prob < 0.45:
+                        continue
+                        
+                    # 3. Speaker Identification (Soft-Match)
+                    if self._diarization_engine and self._diarization_engine.is_running:
+                        candidates = self._diarization_engine.identify_speakers_sync(track_audio, sample_rate)
+                    else:
+                        candidates = []
+
+                    # 4. Prepare WAV and Meta
+                    wav_bytes = pcm_to_wav_bytes(track_audio, sample_rate)
+                    track_meta = meta.copy()
+                    track_meta["segment_id"] = f"seg-{uuid4().hex[:8]}"
+                    if candidates:
+                        track_meta["speaker_candidates"] = candidates
+                        # Preenche a label provisória (usada se o Groq aprovar no pós-filtro)
+                        best_spk = candidates[0][0]
+                        if self._speaker_mapper:
+                            best_spk = self._speaker_mapper.display_name(best_spk)
+                        track_meta["provisional_speaker"] = best_spk
+                    
+                    valid_tracks.append((wav_bytes, track_meta))
+
+                # 5. Submit for concurrent Groq transcription + Levenshtein Deduplication
+                if self._engine and valid_tracks:
+                    # Notice we don't send one by one anymore, we expect the engine 
+                    # to resolve overlapping texts for this same timestamp event.
+                    self._engine.submit_parallel(valid_tracks)
+
+                self._speech_queue.task_done()
             except queue.Empty:
                 continue
             except Exception as e:
-                logger.error("Bridge worker error: %s", e)
+                logger.error("Bridge worker error: %s", e, exc_info=True)
 
     def _float_bridge_worker(self) -> None:
         """Bridge for the floating mode pipeline — no diarization."""

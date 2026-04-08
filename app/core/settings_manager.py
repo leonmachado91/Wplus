@@ -52,6 +52,13 @@ class DiarizationSettings(BaseModel):
     enabled: bool = False
     model: str = "pyannote/speaker-diarization-3.1"
     similarity_threshold: float = 0.65
+    
+    # -- Source Separation Settings --
+    enable_source_separation: bool = True
+    separator_model: str = "Conv-TasNet (Fast)"
+    overlap_threshold: float = 0.15
+    levenshtein_threshold: float = 0.85
+    
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None
     speaker_labels: dict[str, str] = Field(default_factory=dict)

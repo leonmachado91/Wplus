@@ -130,7 +130,19 @@ class TranscriptionEngine:
         """Submit a WAV chunk for transcription (thread-safe)."""
         if self._loop and self._async_queue:
             asyncio.run_coroutine_threadsafe(
-                self._async_queue.put((wav_bytes, meta)),
+                self._async_queue.put([(wav_bytes, meta)]),
+                self._loop,
+            )
+
+    def submit_parallel(self, tracks: list[tuple[bytes, dict]]) -> None:
+        """Submit multiple parallel tracks for transcription (Thread-safe).
+        They will be processed concurrently and deduplicated.
+        """
+        if not tracks:
+            return
+        if self._loop and self._async_queue:
+            asyncio.run_coroutine_threadsafe(
+                self._async_queue.put(tracks),
                 self._loop,
             )
 
@@ -163,20 +175,24 @@ class TranscriptionEngine:
         try:
             while not self._stop_event.is_set() and not self._stop_requested.is_set():
                 try:
-                    wav_bytes, meta = await asyncio.wait_for(
-                        self._async_queue.get(),
-                        timeout=0.5,
-                    )
+                    # Recebe uma lista de tracks para este evento de chunk
+                    tracks = await asyncio.wait_for(self._async_queue.get(), timeout=0.5)
                 except asyncio.TimeoutError:
                     continue
 
-                await self._transcribe(wav_bytes, meta)
+                if len(tracks) == 1:
+                    await self._transcribe(tracks[0][0], tracks[0][1])
+                else:
+                    await self._transcribe_batch(tracks)
 
             # drain remaining items
             while not self._async_queue.empty():
                 try:
-                    wav_bytes, meta = self._async_queue.get_nowait()
-                    await self._transcribe(wav_bytes, meta)
+                    tracks = self._async_queue.get_nowait()
+                    if len(tracks) == 1:
+                        await self._transcribe(tracks[0][0], tracks[0][1])
+                    else:
+                        await self._transcribe_batch(tracks)
                 except asyncio.QueueEmpty:
                     break
         finally:
@@ -185,7 +201,77 @@ class TranscriptionEngine:
                 await self._client.close()
                 self._client = None
 
+    async def _transcribe_batch(self, tracks: list[tuple[bytes, dict]]) -> None:
+        """Transcreve N trilhas em paralelo, aplica deduplicação cruzada pro-ativa."""
+        # 1. Transcreve todas as trilhas paralelamente pro tempo não acumular!
+        results = await asyncio.gather(
+            *[self._transcribe_internal(wav, meta) for wav, meta in tracks], 
+            return_exceptions=True
+        )
+        
+        valid_segments = []
+        for res in results:
+            if isinstance(res, TranscriptSegment):
+                valid_segments.append(res)
+                
+        if not valid_segments:
+            return
+
+        # 2. Aplicar Deduplicação Inteligente (Segurança de Conteúdo)
+        from thefuzz import fuzz
+        
+        threshold = float(self._settings.get("diarization", "levenshtein_threshold") or 0.85)
+        
+        # Filtra fantasmas por similaridade
+        unique_segments = []
+        for i, current in enumerate(valid_segments):
+            is_ghost = False
+            for prev in unique_segments:
+                # Compara textos
+                sim = fuzz.ratio(current.text.lower(), prev.text.lower()) / 100.0
+                
+                # Se for >= threshold, é o MESMO conteúdo "vazando". Decide qual vive.
+                if sim >= threshold:
+                    logger.debug("Deduplicação: colisão (%.2f) entre '%s' e '%s'", sim, current.text[:30], prev.text[:30])
+                    # Verifica quem tem mais confiança ou se tem a speaker label "melhor"
+                    cur_conf = current.confidence or 0.0
+                    prev_conf = prev.confidence or 0.0
+                    
+                    if cur_conf > prev_conf:
+                        # Substitui o do array pelo atual (melhor energia/confiança)
+                        prev.text = current.text
+                        prev.words = current.words
+                        prev.speaker = current.speaker
+                        prev.confidence = current.confidence
+                    is_ghost = True
+                    break
+                    
+            if not is_ghost:
+                unique_segments.append(current)
+                
+        # 3. Entrega final pro Buffer
+        for seg in unique_segments:
+            if self._buffer is not None:
+                # Injeta Speaker Provisório no Buffer (resolvido Soft-Match)
+                self._buffer.add_segment(seg)
+            if self._on_segment is not None:
+                try:
+                    self._on_segment(seg)
+                except Exception:
+                    logger.exception("on_segment callback error")
+
     async def _transcribe(self, wav_bytes: bytes, meta: dict) -> None:
+        seg = await self._transcribe_internal(wav_bytes, meta)
+        if seg:
+            if self._buffer is not None:
+                self._buffer.add_segment(seg)
+            if self._on_segment is not None:
+                try:
+                    self._on_segment(seg)
+                except Exception:
+                    pass
+
+    async def _transcribe_internal(self, wav_bytes: bytes, meta: dict) -> Optional[TranscriptSegment]:
         if not self._client:
             logger.error("No Groq client — skipping transcription")
             return
@@ -255,6 +341,11 @@ class TranscriptionEngine:
 
                 segment = self._response_to_segment(response, meta)
                 if segment:
+                    # Aplica a identidade Provisória obtida pela Fase de Deduplicação 
+                    # do ModeController, SE existir.
+                    if "provisional_speaker" in meta:
+                        segment.speaker = meta["provisional_speaker"]
+
                     # Atualiza o contexto dinâmico APENAS se o segmento tem conteúdo suficiente
                     # E confiança > 0.40 para evitar realimentar alucinações de ruído (Congelamento de Contexto).
                     segment_words = len(segment.text.split())
@@ -263,14 +354,6 @@ class TranscriptionEngine:
                         with self._last_segment_lock:
                             self._recent_texts.append(segment.text.strip())
 
-                    if self._buffer is not None:
-                        self._buffer.add_segment(segment)
-                    if self._on_segment is not None:
-                        try:
-                            self._on_segment(segment)
-                        except Exception:
-                            logger.exception("on_segment callback error")
-
                     conf_str = f"{segment.confidence:.2f}" if segment.confidence is not None else "n/a"
                     logger.info(
                         "Transcribed [%.1f-%.1fs] conf=%s words=%d: %s",
@@ -278,7 +361,7 @@ class TranscriptionEngine:
                         len(segment.text.split()), segment.text[:100]
                     )
 
-                return
+                return segment
 
             except RateLimitError:
                 wait = (2 ** attempt) * 2
@@ -299,7 +382,8 @@ class TranscriptionEngine:
                 if attempt < 2:
                     await asyncio.sleep(2 ** attempt)
                 else:
-                    return
+                    return None
+        return None
 
     def _is_hallucination(self, text: str, recent_texts: list[str], confidence: float = 0.0) -> bool:
         """Detecta alucinações comuns do Whisper incluindo similaridade fuzzy na janela de histórico.
@@ -346,16 +430,18 @@ class TranscriptionEngine:
                         logger.debug("Similaridade %.0f%% com segmento no histórico — descartado", ratio * 100)
                         return True
 
-        # 5. Texto muito curto (< 3 chars)
-        if len(raw_text_lower.replace(" ", "")) < 3:
-            return True
+        # 5. Texto muito curto (< 3 chars) - Apenas se os filtros exatos estiverem ligados
+        if filters.get("enable_exact", True):
+            if len(raw_text_lower.replace(" ", "")) < 3:
+                return True
 
-        # 6. Palavra repetida 4+ vezes na mesma frase
-        words = raw_text_lower.split()
-        if len(words) >= 4:
-            for word in set(words):
-                if words.count(word) >= 4 and len(word) > 2:
-                    return True
+        # 6. Palavra repetida 4+ vezes na mesma frase - Apenas se o de repetição estiver ligado
+        if filters.get("enable_repetition", True):
+            words = raw_text_lower.split()
+            if len(words) >= 4:
+                for word in set(words):
+                    if words.count(word) >= 4 and len(word) > 2:
+                        return True
 
         return False
 

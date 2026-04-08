@@ -428,6 +428,51 @@ class SettingsDialog(QDialog):
         info_label.setStyleSheet("color: #fabd2f;")
         layout.addRow("", info_label)
 
+        layout.addRow(QLabel("<hr><h2>Separação e Deduplicação</h2>"))
+
+        enable_sep_cb = QCheckBox("Habilitar Separação Proativa de Fontes")
+        enable_sep_cb.setToolTip(
+            "Isola fisicamente as trilhas de vozes em tempo real na VRAM para impedir overlaps e alucinações."
+        )
+        self._ui_elements["diarization"]["enable_source_separation"] = enable_sep_cb
+        layout.addRow("", enable_sep_cb)
+        
+        sep_model_combo = QComboBox()
+        sep_model_combo.addItems(["Conv-TasNet (Fast)", "SepFormer (Studio)"])
+        sep_model_combo.setToolTip(
+            "Conv-TasNet: Leve e ultrarrápido na GPU (~0.4s).\n"
+            "SepFormer: Arquitetura Transformer gigante, extingue o ruído de fundo completamente, mas custa alta VRAM e lentidão (~1.8s)."
+        )
+        self._ui_elements["diarization"]["separator_model"] = sep_model_combo
+        layout.addRow("Modelo de Separação (SOT):", sep_model_combo)
+
+        layout.addRow(
+            "Limiar do Porteiro (Overlap):",
+            self._create_slider_input(
+                "diarization", "overlap_threshold", 0.05, 0.40,
+                tooltip=(
+                    "Sensibilidade para o radar detectar Overlap de falantes.\n"
+                    "• Valor alto (>0.25) → sensível, qualquer variação liga o separador.\n"
+                    "• Valor baixo (<0.10) → tolerante, exige forte sobreposição pra separar.\n"
+                    "Recomendado: 0.15"
+                )
+            )
+        )
+
+        layout.addRow(
+            "Limiar de Deduplicação Levenshtein:",
+            self._create_slider_input(
+                "diarization", "levenshtein_threshold", 0.50, 0.99,
+                tooltip=(
+                    "Se dois textos na mesma janela baterem essa taxa de similaridade,\n"
+                    "a cópia com menor confiança (Fantasma de separação) é deletada.\n"
+                    "Recomendado: 0.85"
+                )
+            )
+        )
+        
+        layout.addRow(QLabel("<hr><h2>Configuração de Embedding</h2>"))
+
         layout.addRow(
             "Limiar de Similaridade de Voz:",
             self._create_slider_input(

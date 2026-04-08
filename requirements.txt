@@ -41,20 +41,24 @@ imageio-ffmpeg>=0.4.9
 # ── Keyboard injection (Mode 3) ───────────────────────────────────────────────
 pynput>=1.7
 
-# ── Diarization (optional — auto-installed on first use) ─────────────────────
+# ── Diarization & Speech Separation ────────────────────────────────────────────
 # pyannote.audio 3.3.2+ fixes: numpy 2.0 compat, torchaudio 2.8+, `token` param
-# Uncomment to pre-install:
-# pyannote.audio>=3.3.2
-#
+pyannote.audio>=3.3.2
+
 # SETUP REQUIRED before first use:
 #   1. Accept model terms at https://huggingface.co/pyannote/speaker-diarization-3.1
 #   2. Accept model terms at https://huggingface.co/pyannote/segmentation-3.0
 #   3. Create a READ token at https://huggingface.co/settings/tokens
 #   4. Add HUGGINGFACE_TOKEN=hf_... to your .env file
-#
+
 # ── Speaker embedding — ECAPA-TDNN (SpeechBrain) ─────────────────────────────
-# speechbrain is installed as a transitive dependency of pyannote.audio.
-# The ECAPA-TDNN model (spkrec-ecapa-voxceleb) is downloaded automatically on
-# first use (~80 MB) and cached in .models/speechbrain/ecapa-voxceleb/
+# The ECAPA-TDNN model (spkrec-ecapa-voxceleb) is downloaded automatically.
 # EER: 0.69% (VoxCeleb1 cleaned) — best for short utterances (1-15s).
-# speechbrain>=1.0  # (transitive via pyannote.audio — no explicit install needed)
+speechbrain>=1.0
+
+# ── Source Separation (Conv-TasNet) ──────────────────────────────────────────
+asteroid>=0.6.0
+
+# ── String Similarity (Deduplication) ────────────────────────────────────────
+thefuzz>=0.20.0
+python-Levenshtein>=0.23.0
