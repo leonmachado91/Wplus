@@ -537,6 +537,17 @@ class SettingsDialog(QDialog):
         intro.setWordWrap(True)
         layout.addWidget(intro)
 
+        enable_rep_cb = QCheckBox("Habilitar Filtro de Repetição")
+        enable_rep_cb.setToolTip(
+            "Descarta segmentos que sejam iguais ou muito similares (>85%) a um segmento recente.\n"
+            "Útil para eliminar alucinações em loop do Whisper.\n"
+            "Desative se perceber que falas legítimas repetidas estão sendo suprimidas."
+        )
+        self._ui_elements["filters"]["enable_repetition"] = enable_rep_cb
+        layout.addWidget(enable_rep_cb)
+
+        layout.addSpacing(15)
+
         enable_pref_cb = QCheckBox("Habilitar Filtro por Prefixo")
         enable_pref_cb.setToolTip(
             "Se desativado, o aplicativo irá transcrever absolutamente tudo que tenha esse prefixo,\n"

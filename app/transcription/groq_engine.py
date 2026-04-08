@@ -331,14 +331,14 @@ class TranscriptionEngine:
                 return True
 
         # 3. Repetição e fuzzy match contra a janela de histórico
-        if recent_texts and len(raw_text_lower) > 6:
+        if filters.get("enable_repetition", True) and recent_texts and len(raw_text_lower) > 6:
             for prev_text in reversed(recent_texts):
                 prev_lower = prev_text.lower().strip()
-                
+
                 # Check repetição exata
                 if raw_text_lower == prev_lower:
                     return True
-                
+
                 # Fuzzy match se ambos forem longos
                 if len(raw_text_lower) > 10 and len(prev_lower) > 10:
                     ratio = SequenceMatcher(None, raw_text_lower, prev_lower).ratio()

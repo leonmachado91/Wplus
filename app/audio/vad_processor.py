@@ -72,6 +72,7 @@ class VADProcessor:
         self._consecutive_speech = 0
         self._consecutive_silence = 0
         self._speech_buffer: list[np.ndarray] = []
+        self._speech_probs: list[float] = []
         self._speech_start_time: float = 0.0
         self._session_frame_count: int = 0
 
@@ -192,6 +193,7 @@ class VADProcessor:
         else:
             # SPEECH state
             self._speech_buffer.append(frame)
+            self._speech_probs.append(prob)
 
             if prob < self.offset_threshold:
                 self._consecutive_silence += 1
@@ -221,11 +223,14 @@ class VADProcessor:
             self._reset_state()
             return
 
+        vad_confidence = float(np.mean(self._speech_probs)) if self._speech_probs else 0.0
+
         meta = {
             "start_time": self._speech_start_time,
             "end_time": self._speech_start_time + (len(audio) / self.sample_rate),
             "duration_ms": duration_ms,
             "chunk_was_forced": forced,
+            "vad_confidence": vad_confidence,
         }
 
         self._speech_queue.put((audio, meta))
@@ -236,6 +241,7 @@ class VADProcessor:
         self._consecutive_speech = 0
         self._consecutive_silence = 0
         self._speech_buffer = []
+        self._speech_probs = []
         self._speech_start_time = 0.0
 
     def _frame_to_seconds(self, frame_count: int) -> float:

@@ -104,6 +104,7 @@ class FiltersSettings(BaseModel):
 
     enable_prefixes: bool = True
     enable_exact: bool = True
+    enable_repetition: bool = True  # fuzzy match + repetição exata contra histórico recente
 
     # Filtradas quando INICIAM o texto (prefixo)
     hallucination_prefixes: list[str] = Field(default_factory=lambda: [

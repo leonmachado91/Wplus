@@ -69,6 +69,18 @@ class ChunkAssembler:
             logger.debug("Discarding chunk < %dms (was %.0fms)", MIN_CHUNK_DURATION_MS, duration_ms)
             return
 
+        # Quality filter 1 — VAD confidence: reject chunks where VAD was uncertain
+        vad_conf = meta.get("vad_confidence", 1.0)
+        if vad_conf < 0.45:
+            logger.debug("Chunk rejeitado: vad_confidence baixa (%.2f) — provavelmente ruído", vad_conf)
+            return
+
+        # Quality filter 2 — RMS energy: reject near-silent chunks
+        rms = float(np.sqrt(np.mean(audio ** 2)))
+        if rms < 0.008:
+            logger.debug("Chunk rejeitado: RMS muito baixo (%.4f) — sinal praticamente silencioso", rms)
+            return
+
         try:
             wav_bytes = pcm_to_wav_bytes(audio, self.sample_rate)
         except Exception:

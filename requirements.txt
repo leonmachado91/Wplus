@@ -51,3 +51,10 @@ pynput>=1.7
 #   2. Accept model terms at https://huggingface.co/pyannote/segmentation-3.0
 #   3. Create a READ token at https://huggingface.co/settings/tokens
 #   4. Add HUGGINGFACE_TOKEN=hf_... to your .env file
+#
+# ── Speaker embedding — ECAPA-TDNN (SpeechBrain) ─────────────────────────────
+# speechbrain is installed as a transitive dependency of pyannote.audio.
+# The ECAPA-TDNN model (spkrec-ecapa-voxceleb) is downloaded automatically on
+# first use (~80 MB) and cached in .models/speechbrain/ecapa-voxceleb/
+# EER: 0.69% (VoxCeleb1 cleaned) — best for short utterances (1-15s).
+# speechbrain>=1.0  # (transitive via pyannote.audio — no explicit install needed)
