@@ -58,6 +58,7 @@ class DiarizationSettings(BaseModel):
     separator_model: str = "Conv-TasNet (Fast)"
     overlap_threshold: float = 0.15
     levenshtein_threshold: float = 0.85
+    crosstalk_filter_ratio: float = 0.30
     
     min_speakers: Optional[int] = None
     max_speakers: Optional[int] = None

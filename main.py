@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import signal
 import sys
+import traceback
 
 logging.basicConfig(
     level=logging.INFO,
@@ -12,6 +13,15 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 logger = logging.getLogger("main")
+
+def _global_exception_handler(exc_type, exc_value, exc_traceback):
+    """Log unhandled exceptions instead of silently crashing PyQt6."""
+    if issubclass(exc_type, KeyboardInterrupt):
+        sys.__excepthook__(exc_type, exc_value, exc_traceback)
+        return
+    logger.critical("Unhandled exception: %s", exc_value, exc_info=(exc_type, exc_value, exc_traceback))
+
+sys.excepthook = _global_exception_handler
 
 # Isolate all Model and Cache downloads (PyTorch, HF, etc.) to the project folder
 import os

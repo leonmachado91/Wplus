@@ -450,9 +450,16 @@ class AudioCaptureEngine:
 
         # Asymmetric smoothing: attack fast (compress peaks), release slowly (recover gain)
         alpha = self._agc_attack if desired_gain < self._agc_gain else self._agc_release
-        self._agc_gain += alpha * (desired_gain - self._agc_gain)
+        new_gain = self._agc_gain + alpha * (desired_gain - self._agc_gain)
 
-        return np.clip(frame * self._agc_gain, -1.0, 1.0).astype(np.float32)
+        # Smooth interpolation per sample to avoid "zipper noise" at frame boundaries
+        gain_curve = np.linspace(self._agc_gain, new_gain, len(frame), dtype=np.float32)
+        if frame.ndim > 1:
+            gain_curve = gain_curve.reshape(-1, 1)
+            
+        self._agc_gain = new_gain
+
+        return np.clip(frame * gain_curve, -1.0, 1.0).astype(np.float32)
 
     def set_paused(self, paused: bool) -> None:
         """Pause or resume audio frame processing.

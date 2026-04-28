@@ -471,6 +471,19 @@ class SettingsDialog(QDialog):
             )
         )
         
+        layout.addRow(
+            "Filtro de Vazamento SOT (Crosstalk):",
+            self._create_slider_input(
+                "diarization", "crosstalk_filter_ratio", 0.05, 0.70,
+                tooltip=(
+                    "Muta trechos locais de trilhas separadas que tiverem energia MENOR do que\n"
+                    "essa proporção comparado à voz principal. Remove ecos e \n"
+                    "fantasmas de cruzamento de vozes.\n"
+                    "Recomendado: 0.30"
+                )
+            )
+        )
+        
         layout.addRow(QLabel("<hr><h2>Configuração de Embedding</h2>"))
 
         layout.addRow(

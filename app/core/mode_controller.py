@@ -638,16 +638,19 @@ class ModeController:
                     tracks = [audio_np]
 
                 valid_tracks = []
-                # Filtro acústico relacional: Tracks que possuem menos de 20%
-                # da energia da trilha principal são "Sombras/Bleeds" do isolamento
-                # proativo do Conv-TasNet e devem ser descartadas sumariamente como lixo, 
-                # impedindo o VAD e o Whisper de tentarem achar chifre em cabeça de cavalo.
+                
+                # Global RMS Filter (Relational Acoustics)
                 rms_list = [float(np.sqrt(np.mean(t ** 2))) for t in tracks]
                 max_rms = max(rms_list) if rms_list else 0.0
 
+                crosstalk_ratio = self._settings.get("diarization", "crosstalk_filter_ratio")
+                if crosstalk_ratio is None:
+                    crosstalk_ratio = 0.30
+
                 for track_audio, rms in zip(tracks, rms_list):
-                    # 2. Track Validation (RMS & Secondary VAD)
-                    if rms < max(0.005, max_rms * 0.20): 
+                    # Descartamos a trilha APENAS se ela for, na MÉDIA GERAL do chunk,
+                    # absurdamente mais silenciosa que a trilha principal.
+                    if rms < max(0.005, max_rms * float(crosstalk_ratio)): 
                         continue
                         
                     vad_prob = VADProcessor.evaluate_track(track_audio, sample_rate)

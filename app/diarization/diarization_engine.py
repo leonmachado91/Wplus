@@ -76,6 +76,7 @@ class DiarizationEngine:
         self._encoder = None          # SpeechBrain ECAPA-TDNN
         self._model_loaded = threading.Event()
         self._model_error: Optional[str] = None
+        self._load_lock = threading.Lock()
 
         self._queue: queue.Queue = queue.Queue()
         self._stop_event = threading.Event()
@@ -130,7 +131,8 @@ class DiarizationEngine:
             return
         self._stop_event.set()
         if self._thread:
-            self._thread.join(timeout=10)
+            # Não bloquear por muito tempo a UI
+            self._thread.join(timeout=2)
         self._is_running = False
         logger.info("DiarizationEngine stopped.")
 
@@ -485,8 +487,12 @@ class DiarizationEngine:
 
     def _load_model(self) -> None:
         """Load ECAPA-TDNN directly via SpeechBrain for live speaker verification."""
-        if not self._ensure_dependencies():
-            return
+        with self._load_lock:
+            if self._encoder is not None:
+                return
+
+            if not self._ensure_dependencies():
+                return
 
         import warnings
 
