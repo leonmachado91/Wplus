@@ -70,6 +70,7 @@ class ServerSettings(BaseModel):
     websocket_host: str = "127.0.0.1"
     websocket_port: int = 8765
     rest_api_enabled: bool = True
+    rest_api_host: str = "0.0.0.0"   # 0.0.0.0 needed for multi-device (phones on LAN)
     rest_api_port: int = 8766
     api_key_enabled: bool = False
     cors_origins: list[str] = Field(
@@ -105,6 +106,17 @@ class UISettings(BaseModel):
     font_family: str = "JetBrains Mono"
     font_size: int = 11
     minimize_to_tray: bool = True
+
+
+class MultideviceSettings(BaseModel):
+    default_mode: str = "auto"           # presencial | remoto | auto
+    bleed_gate_enabled: bool = True
+    bleed_margin_db: float = 6.0
+    bleed_window_ms: int = 500
+    bleed_activation_ms: int = 150
+    bleed_deactivation_ms: int = 400
+    max_participants: int = 10
+    participant_timeout_s: int = 30
 
 
 class FiltersSettings(BaseModel):
@@ -156,6 +168,7 @@ class AppSettings(BaseModel):
     mode3: Mode3Settings = Field(default_factory=Mode3Settings)
     ui: UISettings = Field(default_factory=UISettings)
     filters: FiltersSettings = Field(default_factory=FiltersSettings)
+    multidevice: MultideviceSettings = Field(default_factory=MultideviceSettings)
 
 
 # ── Settings Manager ────────────────────────────────────────────────────────

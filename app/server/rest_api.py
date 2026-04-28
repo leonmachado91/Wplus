@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import io
 import logging
+import socket
 import threading
+from pathlib import Path
 from typing import Any, Optional
 
 import uvicorn
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse, Response
 
 from app.core.mode_controller import ModeController
 from app.core.settings_manager import SettingsManager
@@ -14,16 +18,85 @@ from app.core.transcript_buffer import TranscriptBuffer
 
 logger = logging.getLogger(__name__)
 
+_STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+
+
+def _local_ip() -> str:
+    """Best-effort: return the machine's primary LAN IP."""
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "127.0.0.1"
+
 
 def create_app(settings: SettingsManager, buffer: TranscriptBuffer, mode_controller: Any = None) -> FastAPI:
     app = FastAPI(title="Transcription App API", version="0.1.0")
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=settings.get("server", "cors_origins"),
+        allow_origins=["*"],     # web client is same-origin; * needed for QR-linked phones
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    # ── Multi-device audio WebSocket router ──────────────────────────────
+    from app.server.ws_audio_ingest import router as audio_ws_router
+    app.include_router(audio_ws_router)
+
+    # ── Multi-device web client routes ───────────────────────────────────
+
+    @app.get("/join/{session_code}")
+    def join_client(session_code: str) -> FileResponse:
+        """Serve the participant web client HTML (session_code used in URL routing only)."""
+        logger.debug("Serving client HTML for session %s", session_code)
+        return FileResponse(_STATIC_DIR / "client.html", media_type="text/html")
+
+    @app.get("/join/{session_code}/qr")
+    def join_qr(session_code: str) -> Response:
+        """Generate and return a QR code PNG for the session join URL."""
+        try:
+            import qrcode
+        except ImportError:
+            return Response(content=b"qrcode not installed", media_type="text/plain", status_code=500)
+
+        port = settings.get("server", "rest_api_port")
+        ip = _local_ip()
+        url = f"http://{ip}:{port}/join/{session_code}"
+
+        qr = qrcode.QRCode(version=1, box_size=10, border=4)
+        qr.add_data(url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        buf = io.BytesIO()
+        img.save(buf, format="PNG")
+        return Response(content=buf.getvalue(), media_type="image/png")
+
+    @app.get("/api/multidevice/status")
+    def multidevice_status(request: Request) -> dict:
+        """Return current multi-device session status."""
+        manager = getattr(request.app.state, "participant_manager", None)
+        if manager is None or not manager.is_active:
+            return {"active": False}
+        participants = [
+            {
+                "token": p.token[:8],
+                "display_name": p.display_name,
+                "mode": p.mode,
+                "muted": p.muted,
+                "chunk_count": p.chunk_count,
+            }
+            for p in manager.get_participants()
+        ]
+        return {
+            "active": True,
+            "session_code": manager.session_code,
+            "participant_count": manager.participant_count,
+            "participants": participants,
+        }
 
     @app.get("/api/status")
     def get_status() -> dict:
@@ -167,9 +240,9 @@ class RESTAPIServer:
         self._thread: Optional[threading.Thread] = None
 
     def start(self) -> None:
-        app = create_app(self._settings, self._buffer, self._mode_controller)
+        self._fastapi_app = create_app(self._settings, self._buffer, self._mode_controller)
         config = uvicorn.Config(
-            app,
+            self._fastapi_app,
             host=self.host,
             port=self.port,
             log_level="warning",
@@ -179,6 +252,11 @@ class RESTAPIServer:
         self._thread = threading.Thread(target=self._server.run, daemon=True, name="rest-api")
         self._thread.start()
         logger.info("REST API started on http://%s:%s", self.host, self.port)
+
+    @property
+    def fastapi_app(self) -> Optional[FastAPI]:
+        """The raw FastAPI application instance (not the ASGI middleware wrapper)."""
+        return getattr(self, "_fastapi_app", None)
 
     def stop(self) -> None:
         if self._server:

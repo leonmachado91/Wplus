@@ -125,6 +125,15 @@ class MainWindow(QMainWindow):
         self._floating_panel = FloatingButtonPanel(self._settings, self._mode_controller)
         self._tabs.addTab(self._floating_panel, "🎤 Botão Flutuante")
 
+        # Aba: Multi-Dispositivo (índice 3)
+        from app.ui.multidevice_panel import MultidevicePanel
+        self._multidevice_panel = MultidevicePanel(
+            self._settings,
+            self._server_manager,
+            self._buffer,
+        )
+        self._tabs.addTab(self._multidevice_panel, "📡 Multi-Dispositivo")
+
         self._prev_tab_index = 0
 
         # Conecta APÓS todos os tabs para evitar AttributeError durante addTab()
@@ -145,10 +154,11 @@ class MainWindow(QMainWindow):
         """Injeta o FileWatcherMode no app.state da FastAPI para acesso via REST."""
         try:
             rest = self._server_manager.rest
-            if rest and rest._server:
-                fastapi_app = rest._server.config.app
-                fastapi_app.state.file_watcher = self._file_watcher_panel.watcher
-                logger.info("File watcher conectado ao app.state da REST API")
+            if rest:
+                fastapi_app = rest.fastapi_app
+                if fastapi_app is not None:
+                    fastapi_app.state.file_watcher = self._file_watcher_panel.watcher
+                    logger.info("File watcher conectado ao app.state da REST API")
         except Exception:
             logger.debug("Não foi possível conectar file_watcher ao REST state (servidor ainda iniciando)")
 

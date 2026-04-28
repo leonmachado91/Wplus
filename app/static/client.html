@@ -1,0 +1,355 @@
+<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no"/>
+  <meta name="theme-color" content="#1d2021"/>
+  <title>Transcrição — Participante</title>
+  <style>
+    *{box-sizing:border-box;margin:0;padding:0}
+    body{background:#1d2021;color:#ebdbb2;font-family:system-ui,-apple-system,sans-serif;
+         min-height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:24px}
+    h1{font-size:1.2rem;color:#83a598;margin-bottom:8px;text-align:center}
+    .subtitle{font-size:.85rem;color:#a89984;text-align:center;margin-bottom:32px}
+    .card{background:#282828;border-radius:12px;padding:28px 24px;width:100%;max-width:400px;
+          box-shadow:0 4px 24px #0006}
+    label{display:block;font-size:.8rem;color:#a89984;margin-bottom:6px;margin-top:16px}
+    label:first-child{margin-top:0}
+    input[type=text]{width:100%;background:#3c3836;border:1px solid #504945;border-radius:8px;
+                     color:#ebdbb2;font-size:1rem;padding:12px 14px;outline:none;
+                     transition:border-color .2s}
+    input[type=text]:focus{border-color:#83a598}
+    .mode-row{display:flex;gap:8px;margin-top:4px}
+    .mode-btn{flex:1;padding:10px;background:#3c3836;border:2px solid transparent;
+              border-radius:8px;color:#a89984;font-size:.85rem;cursor:pointer;
+              text-align:center;transition:all .15s;user-select:none}
+    .mode-btn.active{border-color:#83a598;color:#ebdbb2;background:#3c3836}
+    .mode-btn:hover{background:#504945}
+    .btn{width:100%;margin-top:24px;padding:14px;background:#83a598;border:none;
+         border-radius:8px;color:#1d2021;font-size:1rem;font-weight:700;cursor:pointer;
+         transition:background .15s}
+    .btn:hover{background:#a1c4b8}
+    .btn:disabled{background:#504945;color:#7c6f64;cursor:not-allowed}
+    /* Recording screen */
+    .status-ring{width:80px;height:80px;border-radius:50%;background:#282828;
+                 border:3px solid #83a598;display:flex;align-items:center;justify-content:center;
+                 margin:0 auto 20px;transition:all .3s;font-size:2rem}
+    .status-ring.speaking{border-color:#b8bb26;animation:pulse 1s ease-in-out infinite}
+    .status-ring.muted{border-color:#cc241d}
+    .status-ring.disconnected{border-color:#d79921}
+    @keyframes pulse{0%,100%{box-shadow:0 0 0 0 #b8bb2640}50%{box-shadow:0 0 0 12px #b8bb2600}}
+    .speaker-name{font-size:1.3rem;font-weight:700;text-align:center;color:#ebdbb2;margin-bottom:4px}
+    .status-text{font-size:.85rem;color:#a89984;text-align:center;margin-bottom:24px}
+    .mute-btn{width:100%;padding:14px;background:#3c3836;border:2px solid #504945;
+              border-radius:8px;color:#ebdbb2;font-size:1rem;cursor:pointer;
+              transition:all .15s;margin-bottom:12px}
+    .mute-btn:hover{background:#504945}
+    .mute-btn.muted{border-color:#cc241d;color:#cc241d}
+    .leave-btn{width:100%;padding:10px;background:transparent;border:1px solid #504945;
+               border-radius:8px;color:#a89984;font-size:.85rem;cursor:pointer;
+               transition:all .15s}
+    .leave-btn:hover{border-color:#cc241d;color:#cc241d}
+    .screen{display:none}
+    .screen.active{display:block}
+    .error-box{background:#3c3836;border:1px solid #cc241d;border-radius:8px;padding:16px;
+               color:#fb4934;font-size:.9rem;margin-top:16px;text-align:center}
+  </style>
+</head>
+<body>
+  <h1>Transcrição Multi-Dispositivo</h1>
+  <p class="subtitle">Cada participante usa o próprio microfone</p>
+
+  <!-- Screen 1: name entry -->
+  <div class="card screen active" id="screen-join">
+    <label for="inp-name">Seu nome</label>
+    <input type="text" id="inp-name" placeholder="Como quer ser identificado?" maxlength="64" autocomplete="off"/>
+
+    <label>Modo</label>
+    <div class="mode-row">
+      <div class="mode-btn" data-mode="presencial" onclick="selectMode(this)">Presencial</div>
+      <div class="mode-btn active" data-mode="auto" onclick="selectMode(this)">Auto</div>
+      <div class="mode-btn" data-mode="remoto" onclick="selectMode(this)">Remoto</div>
+    </div>
+
+    <button class="btn" id="btn-enter" onclick="enterSession()">Entrar na sessão</button>
+    <div id="join-error" class="error-box" style="display:none"></div>
+  </div>
+
+  <!-- Screen 2: recording -->
+  <div class="card screen" id="screen-recording">
+    <div class="status-ring" id="status-ring">🎤</div>
+    <div class="speaker-name" id="lbl-name"></div>
+    <div class="status-text" id="lbl-status">Conectando...</div>
+    <button class="mute-btn" id="btn-mute" onclick="toggleMute()">🔇 Silenciar</button>
+    <button class="leave-btn" onclick="leaveSession()">Sair da sessão</button>
+  </div>
+
+  <!-- Screen 3: finished -->
+  <div class="card screen" id="screen-done">
+    <p style="text-align:center;color:#a89984;margin-bottom:20px">Você saiu da sessão.</p>
+    <button class="btn" onclick="location.reload()">Entrar novamente</button>
+  </div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+const sessionCode = location.pathname.split('/').filter(Boolean).pop() || '';
+let selectedMode = 'auto';
+let ws = null;
+let mediaRecorder = null;
+let stream = null;
+let muted = false;
+let frameIndex = 0;
+let wakeLock = null;
+let reconnectTimer = null;
+let reconnectDelay = 3000;
+const MAX_RECONNECT_DELAY = 30000;
+let currentToken = null;
+let currentName = '';
+
+// Time Sync
+let clockOffsetMs = 0;
+let timeSyncIterations = 0;
+const MAX_TIME_SYNC = 5;
+
+// ── UI helpers ────────────────────────────────────────────────────────────────
+function showScreen(id) {
+  document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+  document.getElementById(id).classList.add('active');
+}
+function setStatus(text, ringClass) {
+  document.getElementById('lbl-status').textContent = text;
+  const ring = document.getElementById('status-ring');
+  ring.className = 'status-ring' + (ringClass ? ' ' + ringClass : '');
+}
+function showJoinError(msg) {
+  const el = document.getElementById('join-error');
+  el.textContent = msg;
+  el.style.display = 'block';
+}
+function selectMode(el) {
+  document.querySelectorAll('.mode-btn').forEach(b => b.classList.remove('active'));
+  el.classList.add('active');
+  selectedMode = el.dataset.mode;
+}
+
+// ── Wake Lock ─────────────────────────────────────────────────────────────────
+async function acquireWakeLock() {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    wakeLock = await navigator.wakeLock.request('screen');
+  } catch (_) {}
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible' && !wakeLock) acquireWakeLock();
+  });
+}
+
+// ── Session join ──────────────────────────────────────────────────────────────
+async function enterSession() {
+  const name = document.getElementById('inp-name').value.trim();
+  if (!name) { showJoinError('Digite seu nome antes de entrar.'); return; }
+  document.getElementById('btn-enter').disabled = true;
+  document.getElementById('join-error').style.display = 'none';
+
+  // 1. Request mic
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        channelCount: 1,
+        sampleRate: 16000,
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+      }
+    });
+  } catch (e) {
+    showJoinError('Permissão de microfone negada. Habilite e tente novamente.');
+    document.getElementById('btn-enter').disabled = false;
+    return;
+  }
+
+  // 2. Get token from server
+  try {
+    const res = await fetch(`/join/${sessionCode}/token`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+    if (!res.ok) throw new Error('Token request failed');
+    const data = await res.json();
+    currentToken = data.token;
+  } catch (e) {
+    showJoinError('Não foi possível conectar ao servidor. Verifique se a sessão está ativa.');
+    document.getElementById('btn-enter').disabled = false;
+    stream.getTracks().forEach(t => t.stop());
+    return;
+  }
+
+  currentName = name;
+  document.getElementById('lbl-name').textContent = name;
+  showScreen('screen-recording');
+  acquireWakeLock();
+  connectWS();
+}
+
+// ── WebSocket ─────────────────────────────────────────────────────────────────
+function connectWS() {
+  if (ws) { try { ws.close(); } catch(_) {} }
+  clearTimeout(reconnectTimer);
+
+  const protocol = location.protocol === 'https:' ? 'wss' : 'ws';
+  const wsUrl = `${protocol}://${location.host}/ws/audio/${sessionCode}/${currentToken}`;
+
+  setStatus('Conectando...', 'disconnected');
+  ws = new WebSocket(wsUrl);
+
+  ws.onopen = () => {
+    reconnectDelay = 3000;
+    ws.send(JSON.stringify({
+      type: 'hello',
+      display_name: currentName,
+      mode: selectedMode,
+      device_info: navigator.userAgent.substring(0, 80),
+    }));
+    
+    // Start clock synchronization
+    clockOffsetMs = 0;
+    timeSyncIterations = 0;
+    syncClock();
+    
+    startRecording();
+  };
+
+  function syncClock() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    ws.send(JSON.stringify({
+      type: 'time_sync',
+      client_send_time: Date.now()
+    }));
+  }
+
+  ws.onmessage = (event) => {
+    try {
+      const msg = JSON.parse(event.data);
+      if (msg.type === 'welcome') setStatus('Gravando — fale normalmente', muted ? 'muted' : '');
+      if (msg.type === 'error') setStatus('Erro: ' + msg.message, 'disconnected');
+      if (msg.type === 'time_sync_response') {
+        const rtt = Date.now() - msg.client_send_time;
+        const estimatedServerTime = msg.server_recv_time + (rtt / 2);
+        const offset = estimatedServerTime - Date.now();
+        
+        if (timeSyncIterations === 0) {
+          clockOffsetMs = offset;
+        } else {
+          // Average smoothing
+          clockOffsetMs = (clockOffsetMs * 0.7) + (offset * 0.3);
+        }
+        
+        timeSyncIterations++;
+        if (timeSyncIterations < MAX_TIME_SYNC) {
+          setTimeout(syncClock, 100);
+        }
+      }
+    } catch(_) {}
+  };
+
+  ws.onerror = () => setStatus('Erro de conexão', 'disconnected');
+
+  ws.onclose = () => {
+    stopRecording();
+    setStatus('Desconectado — reconectando...', 'disconnected');
+    reconnectTimer = setTimeout(() => {
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY);
+      connectWS();
+    }, reconnectDelay);
+  };
+}
+
+// ── MediaRecorder ─────────────────────────────────────────────────────────────
+function startRecording() {
+  if (mediaRecorder) stopRecording();
+  if (!stream) return;
+
+  const mimeTypes = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/ogg;codecs=opus',
+    'audio/ogg',
+  ];
+  const mimeType = mimeTypes.find(m => MediaRecorder.isTypeSupported(m)) || '';
+
+  const options = { audioBitsPerSecond: 32000 };
+  if (mimeType) options.mimeType = mimeType;
+
+  frameIndex = 0;
+  try {
+    mediaRecorder = new MediaRecorder(stream, options);
+  } catch (e) {
+    setStatus('Erro ao iniciar gravação: ' + e.message, 'disconnected');
+    return;
+  }
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (!e.data || e.data.size === 0 || !ws || ws.readyState !== WebSocket.OPEN) return;
+    // Capture timestamp and apply the calculated clock offset
+    // so this timestamp reflects exactly what time it is on the server right now.
+    const tsMs = (Date.now() + clockOffsetMs) >>> 0;
+    e.data.arrayBuffer().then(buf => {
+      const header = new ArrayBuffer(12);
+      const view = new DataView(header);
+      view.setUint32(0, tsMs, false);
+      view.setUint32(4, frameIndex++, false);
+      view.setUint32(8, buf.byteLength, false);
+
+      const frame = new Blob([header, buf]);
+      if (ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
+    });
+  };
+
+  mediaRecorder.start(200);  // 200ms timeslice
+  setStatus('Gravando — fale normalmente', muted ? 'muted' : '');
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    try { mediaRecorder.stop(); } catch(_) {}
+  }
+  mediaRecorder = null;
+}
+
+// ── Mute ─────────────────────────────────────────────────────────────────────
+function toggleMute() {
+  muted = !muted;
+  if (stream) stream.getAudioTracks().forEach(t => { t.enabled = !muted; });
+  const btn = document.getElementById('btn-mute');
+  btn.textContent = muted ? '🔊 Reativar mic' : '🔇 Silenciar';
+  btn.className = 'mute-btn' + (muted ? ' muted' : '');
+  setStatus(muted ? 'Microfone silenciado' : 'Gravando — fale normalmente', muted ? 'muted' : '');
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: 'status', muted }));
+  }
+}
+
+// ── Leave ─────────────────────────────────────────────────────────────────────
+function leaveSession() {
+  clearTimeout(reconnectTimer);
+  stopRecording();
+  if (stream) { stream.getTracks().forEach(t => t.stop()); stream = null; }
+  if (ws) {
+    try { ws.send(JSON.stringify({ type: 'bye' })); } catch(_) {}
+    try { ws.close(); } catch(_) {}
+    ws = null;
+  }
+  if (wakeLock) { try { wakeLock.release(); } catch(_) {} wakeLock = null; }
+  showScreen('screen-done');
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+document.getElementById('inp-name').addEventListener('keydown', e => {
+  if (e.key === 'Enter') enterSession();
+});
+
+// Warn if page goes to background (iOS suspends getUserMedia in background tabs)
+document.addEventListener('visibilitychange', () => {
+  if (document.visibilityState === 'hidden' && mediaRecorder) {
+    setStatus('⚠️ App em background — mantenha na tela', '');
+  }
+});
+</script>
+</body>
+</html>

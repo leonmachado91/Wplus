@@ -33,7 +33,7 @@ class ServerManager:
                 self._settings,
                 self._buffer,
                 self._mode_controller,
-                host="127.0.0.1",
+                host=srv.rest_api_host,
                 port=srv.rest_api_port,
             )
             self.rest.start()

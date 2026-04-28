@@ -71,14 +71,17 @@ class ChunkAssembler:
 
         # Quality filter 1 — VAD confidence: reject chunks where VAD was uncertain
         vad_conf = meta.get("vad_confidence", 1.0)
-        if vad_conf < 0.45:
+        if vad_conf < 0.50:
             logger.debug("Chunk rejeitado: vad_confidence baixa (%.2f) — provavelmente ruído", vad_conf)
             return
 
         # Quality filter 2 — RMS energy: reject near-silent chunks
+        # 0.04 is calibrated against actual device bleed/noise tests.
+        # Bleed from 3m distance typically measures ~0.01-0.035.
+        # Actual speech measures > 0.13.
         rms = float(np.sqrt(np.mean(audio ** 2)))
-        if rms < 0.008:
-            logger.debug("Chunk rejeitado: RMS muito baixo (%.4f) — sinal praticamente silencioso", rms)
+        if rms < 0.04:
+            logger.debug("Chunk rejeitado: RMS muito baixo (%.4f < 0.04) — provável bleed/ruído", rms)
             return
 
         try:
@@ -90,7 +93,8 @@ class ChunkAssembler:
         # Pre-assign segment_id so Groq and Diarization share the same ID.
         # Groq will use it when creating TranscriptSegment; Diarization uses it
         # to call buffer.update_segment() after speaker assignment.
-        meta = {**meta, "segment_id": f"seg-{uuid4().hex[:8]}"}
+        # rms_mean is forwarded for use by BleedGateCoordinator (cross-device energy gate).
+        meta = {**meta, "segment_id": f"seg-{uuid4().hex[:8]}", "rms_mean": rms}
 
         logger.debug(
             "Chunk ready: %.1fs (%.0fms, %d bytes WAV, forced=%s, id=%s)",

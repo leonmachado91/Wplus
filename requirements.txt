@@ -62,3 +62,6 @@ asteroid>=0.6.0
 # ── String Similarity (Deduplication) ────────────────────────────────────────
 thefuzz>=0.20.0
 python-Levenshtein>=0.23.0
+
+# ── Multi-device session ───────────────────────────────────────────────────────
+qrcode[pil]>=7.4          # QR code generation for session pairing
